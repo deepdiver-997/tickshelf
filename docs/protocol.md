@@ -85,12 +85,15 @@ type=1、count=0、payload_bytes=0、crc32=0。collector 超过 N 秒（默认 5
 - 单字段翻转（count / payload_bytes / crc32 各翻转一位）：全部被对应防线拦截
 - 重同步：载荷中埋假 magic + 不一致长度 → 扫描跳过假锚点，在真帧头处恢复
 
-## 键空间与批 id 约定（v1.2 段式布局，ADR-017）
+## 键空间与批 id 约定（v1.3 状态 HASH，ADR-019）
 
 - 段 `seg:{批id}`（STRING，批内 tick 64B 打包，与批 1:1）、索引 `idx:{symbol}`（ZSET，
   score=批首 ts，member=`{date}:{首}-{尾}`）——v1 逐 tick 行情键 `ts:{symbol}:{yyyymmdd}`
   已退役；未来段格式升级的迁移配方（双读 + idx 当迁移账本）见 ADR-018
-- 状态键 `state:{批id}`（值 pending/done）、租约键 `lease:{批id}`（SET NX EX 60）
+- 状态 `state`（HASH，field=批id → pending/done；ADR-019：S 批一条 HSET/HDEL，遍历走
+  HSCAN 不走 SCAN；v0.x 的逐批 `state:{批id}` 键已退役）
+- 租约键 `lease:{批id}`（SET NX EX 60，**保留逐批键形态**——需要 per-key TTL，
+  HASH field 无独立过期除非绑 Redis ≥7.4 的 HEXPIRE）
 - 回补键 `backfill:{sym}:{from}-{to}`（SETNX 去重，值 done/unrepairable——ADR-014）
 - 最新价投影 `latest`（全局 HASH，field=symbol，value=64B tick 字节；flush 路径单条
   HSET 聚合更新，回补不改——ADR-016）

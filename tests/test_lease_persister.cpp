@@ -55,9 +55,9 @@ void seed_batch(RespClient& rc, const char* sym, std::uint64_t ts_a, std::uint64
     REQUIRE(flush_batches(rc, batches));
 }
 
-std::string state_value(RespClient& rc, const std::string& key) {
+std::string state_value(RespClient& rc, const std::string& field) {
     std::vector<RespValue> r;
-    REQUIRE(rc.exec({{"GET", key}}, r));
+    REQUIRE(rc.exec({{"HGET", state_key(), field}}, r));
     return r[0].type == RespValue::Type::Bulk ? r[0].str : "<nil>";
 }
 
@@ -136,10 +136,10 @@ TEST_CASE("租约落盘集成: 幂等/抢占/重做（需 redis-server）") {
         LeasePersister lp(rc, store, worker_opts("w1"));
         CHECK(lp.poll_once() == 1);
         CHECK(store.count() == 2);
-        CHECK(state_value(rc, state_key_of(id)) == "done");
+        CHECK(state_value(rc, id) == "done");
 
         // state 重置回 pending 重跑：租约释放 + 幂等 upsert → 行数不变
-        REQUIRE(rc.exec({{"SET", state_key_of(id), "pending"}}, sink));
+        REQUIRE(rc.exec({{"HSET", state_key(), id, "pending"}}, sink));
         CHECK(lp.poll_once() == 1);
         CHECK(store.count() == 2);
         CHECK(lp.stats().ticks_upserted == 2);  // 第二轮插入 0 行
@@ -154,17 +154,17 @@ TEST_CASE("租约落盘集成: 幂等/抢占/重做（需 redis-server）") {
         CHECK(lp.poll_once() == 0);  // 全部跳过
         CHECK(lp.stats().skipped == 1);
         CHECK(store.count() == 0);
-        CHECK(state_value(rc, state_key_of(id)) == "pending");
+        CHECK(state_value(rc, id) == "pending");
     }
 
     SUBCASE("空批（区间无数据）→ 标 done 不崩") {
         // 只写 state 标记、无 ZSET 数据：模拟"标记落了、数据被淘汰/未写"的残局
         const std::string ghost = "ghost:20261108:5-10";
-        REQUIRE(rc.exec({{"SET", state_key_of(ghost), "pending"}}, sink));
+        REQUIRE(rc.exec({{"HSET", state_key(), ghost, "pending"}}, sink));
         LeasePersister lp(rc, store, worker_opts("w3"));
         CHECK(lp.poll_once() >= 0);
         CHECK(lp.stats().empty_batches == 1);
-        CHECK(state_value(rc, state_key_of(ghost)) == "done");
+        CHECK(state_value(rc, ghost) == "done");
     }
 
     SUBCASE("多实例并发视角: 两 worker 轮询不重复插行") {

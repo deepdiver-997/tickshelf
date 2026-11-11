@@ -9,7 +9,8 @@
 // 键空间（design.md 数据模型节，v1 行情键 ts:{sym}:{date} 已随 ADR-017 退役）：
 //   段   seg:{批id}                批内 tick 64B 打包（段键 = "seg:" + 批id，1:1）
 //   索引 idx:{symbol}              ZSET score=批首ts，member={date}:{首}-{尾}
-//   状态键 state:{批id}            批id = {symbol}:{yyyymmdd}:{首ts}-{尾ts}，值 pending/done
+//   状态 state（HASH，field=批id） 值 pending/done（ADR-019：S 批一条 HSET，
+//                                  命令数与符号数解耦；遍历走 HSCAN 不走 SCAN）
 #include <cstdint>
 #include <map>
 #include <string>
@@ -34,7 +35,9 @@ inline std::string batch_id_of(const Batch& b) {
            std::to_string(b.last_ts);
 }
 
-inline std::string state_key_of(const std::string& id) { return "state:" + id; }
+// 状态 HASH（ADR-019）：键固定 "state"，field = 裸批id——注意没有 state_key_of(id)：
+// field 不是键，SET state_key_of(id) 会制造游离键。操作一律显式 HSET/HGET/HDEL state ...
+inline std::string state_key() { return "state"; }
 inline std::string lease_key_of(const std::string& id) { return "lease:" + id; }
 
 class Ingestor {

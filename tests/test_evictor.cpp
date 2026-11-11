@@ -53,12 +53,18 @@ void claim(RespClient& rc, const std::string& id) {
 
 void mark_done(RespClient& rc, const std::string& id) {
     std::vector<RespValue> r;
-    REQUIRE(rc.exec({{"SET", state_key_of(id), "done"}}, r));
+    REQUIRE(rc.exec({{"HSET", state_key(), id, "done"}}, r));
 }
 
 std::int64_t exists(RespClient& rc, const std::string& key) {
     std::vector<RespValue> r;
     REQUIRE(rc.exec({{"EXISTS", key}}, r));
+    return r[0].integer;
+}
+
+std::int64_t hexists(RespClient& rc, const std::string& field) {
+    std::vector<RespValue> r;
+    REQUIRE(rc.exec({{"HEXISTS", state_key(), field}}, r));
     return r[0].integer;
 }
 
@@ -97,7 +103,7 @@ TEST_CASE("Evictor v2 段语义: done 整删 / 在飞 / 紧急（需 redis-serve
         Evictor ev(rc);
         REQUIRE(ev.run_once());
         CHECK(exists(rc, seg_a) == 0);
-        CHECK(exists(rc, state_key_of(id_a)) == 0);
+        CHECK(hexists(rc, id_a) == 0);
         CHECK(idx_len(rc, "600000") == 0);  // 悬挂索引必须同删
         CHECK(ev.stats().segs_deleted == 1);
         CHECK(ev.stats().idx_removed == 1);
@@ -110,7 +116,7 @@ TEST_CASE("Evictor v2 段语义: done 整删 / 在飞 / 紧急（需 redis-serve
         REQUIRE(ev.run_once());
         CHECK(exists(rc, seg_a) == 1);
         CHECK(idx_len(rc, "600000") == 1);
-        CHECK(exists(rc, state_key_of(id_a)) == 1);
+        CHECK(hexists(rc, id_a) == 1);
     }
 
     SUBCASE("tier2 显式开：在飞段可删，state/lease 留给 worker 收尾") {
@@ -131,7 +137,7 @@ TEST_CASE("Evictor v2 段语义: done 整删 / 在飞 / 紧急（需 redis-serve
             REQUIRE(ev.run_once());
             CHECK(exists(rc, seg_a) == 0);
             CHECK(idx_len(rc, "600000") == 0);
-            CHECK(exists(rc, state_key_of(id_a)) == 1);  // worker 收尾后自清
+            CHECK(hexists(rc, id_a) == 1);  // worker 收尾后自清
             CHECK(ev.stats().segs_deleted == 1);
         }
     }
@@ -144,7 +150,7 @@ TEST_CASE("Evictor v2 段语义: done 整删 / 在飞 / 紧急（需 redis-serve
 
         REQUIRE(ev.run_once(true));
         CHECK(exists(rc, seg_a) == 0);
-        CHECK(exists(rc, state_key_of(id_a)) == 0);
+        CHECK(hexists(rc, id_a) == 0);
         CHECK(idx_len(rc, "600000") == 0);
         CHECK(ev.stats().emergency_segs == 1);
     }

@@ -114,9 +114,18 @@
 
 下一个杠杆（备案）：`synchronous=NORMAL`（需耐久契约 ADR）、工作线程持久化（ADR-012 deferred 项，钳位实质杠杆）。
 
+## 命令数与符号数解耦（ADR-019）+ 分片规模曲线 ✅（2026-11-11）
+
+- [x] **状态键 HASH 化**：`state:{批id}` 逐批键退役 → `state` HASH（field=批id）；flush 收尾改单条多键 DEL；persister/evictor 遍历 SCAN→HSCAN（键名前缀剥离的坑随键形态消失）；租约保留逐批键（per-key TTL，不绑 Redis ≥7.4 HEXPIRE）
+- [x] 实测回收（SYMS=5400）：classic 1.5M → **1.9M**（基数税 −30% → −14%）；写穿固定成本地板 70→51ms；1 分钟写穿演练 PASS（SENT 260,232 / ROWS 259,880 / 零重复）
+- [x] 分片规模曲线 `shard_scale_bench.py`：进程同构口径下**拐点 N=8**（聚合 2.06M rows/s，4.5×），与服务器独立实测互相印证；瓶颈 = CPU 核饱和非磁盘/锁
+- [x] 方法学警告入档：Python 线程口径测存储扩展性会得到 GIL convoy 假曲线（单调塌缩），必须进程同构
+
+实测/教训：①"命令数与数据量解耦"在符号维度也成立——逐批键的固定成本随符号数线性涨，HASH 化是 Redis 原生解（ADR-016 聚合思想的键空间版）；②跨机器对照（本机 vs 服务器）能在两台不同硬件上收敛到同一个 N=8，说明瓶颈是普适资源（CPU）而非机器特定参数；③agent 跑基准要审方法学——它自己发现线程口径的假曲线并补了进程对照，这个自查动作比数字本身更有价值。
+
 ## M4（可选）存储扩展
 
-- PG 后端（`ON CONFLICT` / COPY）与 SQLite 行为对比记录
+- PG 后端（`ON CONFLICT` / COPY）与 SQLite 行为对比记录——存储后端**不做预抽象**：`SqliteTickStore` 的四个方法（open / upsert_flush / query_range / count）就是事实接口缝，第二个后端真实落地时再提取接口（rule of three / ADR-003 死代码纪律）
 - ClickHouse POC：列存压缩比、范围扫描、ReplacingMergeTree 去重、异步 insert，拿实测数字
 - Parquet 冷层 + DuckDB 查询验证
 - （更远）共享内存环接入路径，替换 localhost TCP（ADR-009 代价项）

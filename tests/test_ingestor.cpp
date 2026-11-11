@@ -43,8 +43,8 @@ const Batch* find_batch(const std::vector<Batch>& bs, const char* sym, std::uint
 
 }  // namespace
 
-TEST_CASE("build_flush_commands: 段式 v2——SET seg + ZADD idx + latest 单条 HSET（纯函数）") {
-    // 3 tick 分布在 2 symbol → classic 应为 2×(SET seg+ZADD idx+SET state) + HSET = 7 条
+TEST_CASE("build_flush_commands: 段式 v2 + 状态 HASH——SET seg + ZADD idx + 单条 HSET（纯函数）") {
+    // 3 tick 分布在 2 symbol → classic 应为 2×(SET seg+ZADD idx) + HSET state + HSET latest = 6 条
     Ingestor ing;
     ing.ingest(make_tick("600000", 1000));
     ing.ingest(make_tick("600000", 1002));
@@ -56,11 +56,12 @@ TEST_CASE("build_flush_commands: 段式 v2——SET seg + ZADD idx + latest 单�
     std::vector<std::vector<std::string>> cmds;
     std::vector<std::size_t> claimed;
     build_flush_commands(batches, classic, cmds, claimed);
-    REQUIRE(cmds.size() == 2 * 3 + 1);
+    REQUIRE(cmds.size() == 2 * 2 + 2);  // ADR-019：state 单条 HSET，命令数与符号数解耦
     CHECK(claimed.empty());
 
     // 段命令：值 = 批内 tick 打包（2 tick = 128B / 1 tick = 64B），段键 = "seg:" + 批id
-    std::size_t segs = 0, idxs = 0, states = 0;
+    std::size_t segs = 0, idxs = 0;
+    const std::vector<std::string>* state_hset = nullptr;
     for (const auto& c : cmds) {
         if (c[0] == "SET" && c[1].rfind("seg:", 0) == 0) {
             ++segs;
@@ -76,14 +77,17 @@ TEST_CASE("build_flush_commands: 段式 v2——SET seg + ZADD idx + latest 单�
             CHECK((c[1] == idx_key("600000") || c[1] == idx_key("000001")));
             CHECK(c.size() == 4);  // ZADD idx first member
         }
-        if (c[0] == "SET" && c[1].rfind("state:", 0) == 0) ++states;
+        if (c[0] == "HSET" && c[1] == state_key()) state_hset = &c;
     }
     CHECK(segs == 2);
     CHECK(idxs == 2);
-    CHECK(states == 2);
+    REQUIRE(state_hset != nullptr);
+    CHECK(state_hset->size() == 2 + 2 * 2);  // 2 批 × (field=批id, value=pending)
+    for (std::size_t i = 2; i + 1 < state_hset->size(); i += 2)
+        CHECK(state_hset->at(i + 1) == "pending");
 
     CHECK(cmds.back()[0] == "HSET");
-    CHECK(cmds.back()[1] == "latest");
+    CHECK(cmds.back()[1] == latest_key());
     CHECK(cmds.back().size() == 2 + 2 * 2);  // 2 symbol × (field, value)
     for (std::size_t i = 2; i + 1 < cmds.back().size(); i += 2) {
         const Tick lt = decode_tick(reinterpret_cast<const std::uint8_t*>(cmds.back()[i + 1].data()));
@@ -93,28 +97,39 @@ TEST_CASE("build_flush_commands: 段式 v2——SET seg + ZADD idx + latest 单�
             CHECK(lt.ts_exchange_ms == 1001);
     }
 
-    SUBCASE("写穿：每批 [SETNX, SET state, SET seg, ZADD idx]，claimed 指向 SETNX") {
+    SUBCASE("写穿：认领块前置（claimed 步长 1），state 单条 HSET 在段/索引块之后") {
         FlushOptions wt;
         wt.claim_lease = true;
         wt.worker_id = "daemon";
         build_flush_commands(batches, wt, cmds, claimed);
-        REQUIRE(cmds.size() == 2 * 4 + 1);
+        REQUIRE(cmds.size() == 2 * 3 + 2);  // 2 lease + 2 seg + 2 zadd + state + latest
         REQUIRE(claimed.size() == 2);
+        CHECK(claimed[0] == 0);
+        CHECK(claimed[1] == 1);  // 认领块连续，步长 1
         CHECK(cmds[claimed[0]][0] == "SET");
         CHECK(cmds[claimed[0]][3] == "NX");
-        CHECK((cmds[claimed[0] + 2][1].rfind("seg:", 0) == 0));
-        CHECK(cmds[claimed[0] + 3][0] == "ZADD");
-        CHECK(claimed[1] == claimed[0] + 4);  // stride 4：lease/state/seg/idx
+        CHECK((cmds[2][1].rfind("seg:", 0) == 0));  // 认领块后是段块
+        CHECK(cmds[6][0] == "HSET");
+        CHECK(cmds[6][1] == state_key());
+        CHECK(cmds[7][1] == latest_key());
     }
 
-    SUBCASE("单 tick 批：三命令结构不变") {
+    SUBCASE("单 tick 批：classic 4 条 / 写穿 5 条，结构不变") {
         Ingestor ing1;
         ing1.ingest(make_tick("600000", 2000));
         auto one = ing1.drain();
         build_flush_commands(one, classic, cmds, claimed);
-        REQUIRE(cmds.size() == 4);  // SET seg + ZADD idx + SET state + HSET
+        REQUIRE(cmds.size() == 4);  // SET seg + ZADD idx + HSET state + HSET latest
         CHECK((cmds[0][1].rfind("seg:", 0) == 0));
         CHECK(cmds[0][2].size() == kTickBytes);
+
+        FlushOptions wt;
+        wt.claim_lease = true;
+        wt.worker_id = "d";
+        build_flush_commands(one, wt, cmds, claimed);
+        REQUIRE(cmds.size() == 5);
+        CHECK(cmds[0][3] == "NX");
+        CHECK(cmds[3][1] == state_key());
     }
 }
 
@@ -218,7 +233,7 @@ TEST_CASE("flush_batches 集成: 段 + idx + state + latest 落 Redis（需 redi
 
     // state 标记 pending
     const std::string id = "utsym:" + std::to_string(yyyymmdd_from_ms(1001)) + ":1001-1002";
-    REQUIRE(rc.exec({{"GET", state_key_of(id)}}, r));
+    REQUIRE(rc.exec({{"HGET", state_key(), id}}, r));
     REQUIRE(r[0].type == RespValue::Type::Bulk);
     CHECK(r[0].str == "pending");
 

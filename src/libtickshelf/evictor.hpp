@@ -15,7 +15,8 @@
 #include <string>
 #include <vector>
 
-#include "lease_persister.hpp"  // parse_batch_id / state_key_of / lease_key_of
+#include "lease_persister.hpp"  // parse_batch_id / lease_key_of
+#include "ingestor.hpp"         // state_key（ADR-019 状态 HASH）
 #include "resp_client.hpp"
 
 namespace tickshelf {

@@ -91,13 +91,13 @@ done
 log "注入结束，等待 feedgen 收尾"
 wait "$D_FEED" || true; D_FEED=""
 # 写穿模式下被杀 daemon 的在途批要等租约 TTL（60s）过期才由 persister 接手——等追平再收
+# 状态 HASH（ADR-019）：pending 计数 = HGETALL 扁平输出里落在偶数行的 "pending" 值个数
+count_pending() {
+  "$REDIS_CLI" --raw HGETALL state | awk 'NR % 2 == 0 && $0 == "pending" {c++} END {print c+0}'
+}
 tail_tries=0
 while :; do
-  PENDING_NOW=0
-  while read -r k; do
-    v=$("$REDIS_CLI" GET "$k")
-    [ "$v" = "pending" ] && PENDING_NOW=$((PENDING_NOW + 1))
-  done < <("$REDIS_CLI" --scan --pattern 'state:*')
+  PENDING_NOW=$(count_pending)
   [ "$PENDING_NOW" -eq 0 ] && break
   tail_tries=$((tail_tries + 1))
   [ "$tail_tries" -gt 90 ] && break   # 180s 上限（>2×TTL）
@@ -112,11 +112,7 @@ SENT=$(awk '/^SENT /{print $2}' "$WORK/feedgen.out" | tail -1)
 ROWS=$(sqlite3 "$DB" 'SELECT COUNT(*) FROM ticks')
 DUP_SQL="SELECT COUNT(*) - COUNT(DISTINCT symbol || ':' || ts_exchange_ms) FROM ticks"
 DUP=$(sqlite3 "$DB" "$DUP_SQL")
-PENDING=0
-while read -r k; do
-  v=$("$REDIS_CLI" GET "$k")
-  [ "$v" = "pending" ] && PENDING=$((PENDING + 1))
-done < <("$REDIS_CLI" --scan --pattern 'state:*')
+PENDING=$(count_pending)
 
 BUDGET=$(( KILLS_SHELF * LOSS_BUDGET_PER_KILL ))
 MISSING=$(( SENT - ROWS ))

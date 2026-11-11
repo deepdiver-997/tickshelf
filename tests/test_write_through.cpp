@@ -43,6 +43,12 @@ std::string get_str(RespClient& rc, const std::string& key) {
     return r[0].type == RespValue::Type::Bulk ? r[0].str : "<nil>";
 }
 
+std::string hget_state(RespClient& rc, const std::string& field) {
+    std::vector<RespValue> r;
+    REQUIRE(rc.exec({{"HGET", state_key(), field}}, r));
+    return r[0].type == RespValue::Type::Bulk ? r[0].str : "<nil>";
+}
+
 std::int64_t exists(RespClient& rc, const std::string& key) {
     std::vector<RespValue> r;
     REQUIRE(rc.exec({{"EXISTS", key}}, r));
@@ -117,7 +123,7 @@ TEST_CASE("写穿集成: flush 认领 → 落库 → done（需 redis-server）"
     SUBCASE("认领挡住 persister：租约在飞时不重复劳动") {
         const std::string id = wt_flush(rc, "600000", d1 + 100, d1 + 101, batches, store);
         CHECK(exists(rc, lease_key_of(id)) == 1);
-        CHECK(get_str(rc, state_key_of(id)) == "pending");
+        CHECK(hget_state(rc, id) == "pending");
 
         LeasePersister lp(rc, store, worker_opts("w1"));
         CHECK(lp.poll_once() == 0);  // 租约被 daemon 占 → 全部跳过
@@ -128,7 +134,7 @@ TEST_CASE("写穿集成: flush 认领 → 落库 → done（需 redis-server）"
         std::vector<const std::vector<Tick>*> mine = {&batches[0].ticks};
         REQUIRE(store.upsert_flush(mine) == 2);
         REQUIRE(finish_written_batches(rc, batches));
-        CHECK(get_str(rc, state_key_of(id)) == "done");
+        CHECK(hget_state(rc, id) == "done");
         CHECK(exists(rc, lease_key_of(id)) == 0);
         CHECK(lp.poll_once() == 0);  // done 批不再碰
         CHECK(lp.stats().claimed == 0);
@@ -141,12 +147,12 @@ TEST_CASE("写穿集成: flush 认领 → 落库 → done（需 redis-server）"
         // 模拟 daemon 侧 SQLite 故障：不落库直接放弃认领
         REQUIRE(release_claims(rc, batches));
         CHECK(exists(rc, lease_key_of(id)) == 0);
-        CHECK(get_str(rc, state_key_of(id)) == "pending");  // 数据已在 Redis，等接手
+        CHECK(hget_state(rc, id) == "pending");  // 数据已在 Redis，等接手
 
         LeasePersister lp(rc, store, worker_opts("w2"));
         CHECK(lp.poll_once() == 1);  // 读回路径落库
         CHECK(store.count() == 2);
-        CHECK(get_str(rc, state_key_of(id)) == "done");
+        CHECK(hget_state(rc, id) == "done");
     }
 
     SUBCASE("daemon 崩溃窗口：租约 TTL 过期后 persister 接手（语义演示，不等 60s）") {
@@ -156,7 +162,7 @@ TEST_CASE("写穿集成: flush 认领 → 落库 → done（需 redis-server）"
         LeasePersister lp(rc, store, worker_opts("w3"));
         CHECK(lp.poll_once() == 1);  // pending + 无租约 → 认领 → 读回落库
         CHECK(store.count() == 2);
-        CHECK(get_str(rc, state_key_of(id)) == "done");
+        CHECK(hget_state(rc, id) == "done");
     }
 
     rc.exec({{"SELECT", "0"}}, sink);

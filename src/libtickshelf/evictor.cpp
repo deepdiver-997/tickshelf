@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-#include "ingestor.hpp"  // 键辅助：seg_key_of / idx_key / idx_member / state_key_of / lease_key_of
+#include "ingestor.hpp"  // 键辅助：seg_key_of / idx_key / idx_member / state_key / lease_key_of
 
 namespace tickshelf {
 namespace {
@@ -20,35 +20,24 @@ bool Evictor::scan_batches(std::vector<BatchInfo>& out) {
     std::string cursor = "0";
     do {
         std::vector<RespValue> r;
-        if (!rc_.exec({{"SCAN", cursor, "MATCH", "state:*", "COUNT",
-                        std::to_string(opt_.scan_count)}},
+        // 状态 HASH（ADR-019）：HSCAN 遍历，field = 裸批id（无前缀可剥）
+        if (!rc_.exec({{"HSCAN", state_key(), cursor, "COUNT", std::to_string(opt_.scan_count)}},
                       r) ||
             r.size() != 1 || r[0].type != RespValue::Type::Array || r[0].array.size() != 2) {
             return false;
         }
         cursor = r[0].array[0].str;
-        const auto& keys = r[0].array[1];
-        if (keys.type != RespValue::Type::Array) return false;
-        if (!keys.array.empty()) {
-            std::vector<std::vector<std::string>> gets;
-            gets.reserve(keys.array.size());
-            for (const RespValue& k : keys.array) gets.push_back({"GET", k.str});
-            std::vector<RespValue> vals;
-            if (!rc_.exec(gets, vals) || vals.size() != gets.size()) return false;
-            for (std::size_t i = 0; i < gets.size(); ++i) {
-                BatchInfo b;
-                // SCAN 给的是全键名（含 "state:" 前缀），批 id 解析吃裸 id——剥前缀
-                constexpr const char* kPrefix = "state:";
-                const std::string& full_key = gets[i][1];
-                if (full_key.rfind(kPrefix, 0) != 0) continue;
-                if (!LeasePersister::parse_batch_id(full_key.substr(6), b.sym, b.date, b.first,
-                                                    b.last))
-                    continue;
-                b.date_ymd = std::stoull(b.date);
-                b.id = full_key.substr(6);
-                b.done = is_bulk(vals[i]) && vals[i].str == "done";
-                out.push_back(std::move(b));
-            }
+        const auto& pairs = r[0].array[1];
+        if (pairs.type != RespValue::Type::Array) return false;
+        for (std::size_t i = 0; i + 1 < pairs.array.size(); i += 2) {
+            if (pairs.array[i].type != RespValue::Type::Bulk) continue;
+            BatchInfo b;
+            const std::string& id = pairs.array[i].str;
+            if (!LeasePersister::parse_batch_id(id, b.sym, b.date, b.first, b.last)) continue;
+            b.date_ymd = std::stoull(b.date);
+            b.id = id;
+            b.done = is_bulk(pairs.array[i + 1]) && pairs.array[i + 1].str == "done";
+            out.push_back(std::move(b));
         }
     } while (cursor != "0");
     return true;
@@ -80,18 +69,25 @@ bool Evictor::run_once(bool emergency) {
 
     std::vector<RespValue> r;
     auto delete_batch = [&](const BatchInfo& b, bool with_state) {
-        // 段与索引必须同删：悬挂索引 = 幽灵段（查询会 GET 不存在的键，静默空段）
-        if (!rc_.exec({{"DEL", seg_key_of(b.id)},
-                       {"ZREM", idx_key(b.sym), idx_member(b.date_ymd, b.first, b.last)}},
-                      r) ||
-            r.size() != 2)
-            return false;
+        // 段与索引必须同删：悬挂索引 = 幽灵段（查询会 GET 不存在的键，静默空段）；
+        // state 走 HDEL（ADR-019，field=批id）
+        if (with_state) {
+            if (!rc_.exec({{"DEL", seg_key_of(b.id)},
+                           {"ZREM", idx_key(b.sym), idx_member(b.date_ymd, b.first, b.last)},
+                           {"HDEL", state_key(), b.id}},
+                          r) ||
+                r.size() != 3)
+                return false;
+            ++stats_.states_deleted;
+        } else {
+            if (!rc_.exec({{"DEL", seg_key_of(b.id)},
+                           {"ZREM", idx_key(b.sym), idx_member(b.date_ymd, b.first, b.last)}},
+                          r) ||
+                r.size() != 2)
+                return false;
+        }
         ++stats_.segs_deleted;
         ++stats_.idx_removed;
-        if (with_state) {
-            if (!rc_.exec({{"DEL", state_key_of(b.id)}}, r)) return false;
-            ++stats_.states_deleted;
-        }
         return true;
     };
 

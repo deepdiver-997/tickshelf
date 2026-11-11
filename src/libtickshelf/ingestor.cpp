@@ -52,7 +52,7 @@ void build_flush_commands(const std::vector<Batch>& batches, const FlushOptions&
                           std::vector<std::size_t>& claimed_idx) {
     commands.clear();
     claimed_idx.clear();
-    commands.reserve(batches.size() * 4 + 2);
+    commands.reserve(batches.size() * 3 + 2);
 
     // 最新投影聚合：每 symbol 取本 flush 内 ts 最大的 tick（ADR-016）
     std::map<std::string, Tick> newest;  // symbol（去 NUL 形式）→ 最新 tick
@@ -64,20 +64,35 @@ void build_flush_commands(const std::vector<Batch>& batches, const FlushOptions&
                 newest[sym] = t;
         }
 
+    // 写穿认领块前置（连续 S 条 SETNX，claimed_idx 步长 1）——管道序保证全部 lease
+    // 先于后面的 state HSET 落地，persister 仲裁前提（ADR-012）不受 HASH 化影响
+    if (opt.claim_lease) {
+        for (const Batch& b : batches) {
+            claimed_idx.push_back(commands.size());
+            commands.push_back({"SET", lease_key_of(batch_id_of(b)), opt.worker_id, "NX", "EX",
+                                std::to_string(opt.lease_ttl_s)});
+        }
+    }
+    // 段式 v2（ADR-017）：批 → 一个原始字节段 + 一条索引，命令数与 tick 数无关
     for (const Batch& b : batches) {
         const std::string id = batch_id_of(b);
-        const std::string packed = pack_batch(b.ticks);
-        if (opt.claim_lease) {
-            claimed_idx.push_back(commands.size());
-            commands.push_back({"SET", lease_key_of(id), opt.worker_id, "NX", "EX",
-                                std::to_string(opt.lease_ttl_s)});
-            commands.push_back({"SET", state_key_of(id), "pending"});
-        }
-        // 段式 v2（ADR-017）：批 → 一个原始字节段 + 一条索引，命令数与 tick 数无关
-        commands.push_back({"SET", seg_key_of(id), std::move(packed)});
+        commands.emplace_back(3);
+        auto& seg = commands.back();  // emplace 避开 initializer_list 的值拷贝（段值大）
+        seg[0] = "SET";
+        seg[1] = seg_key_of(id);
+        seg[2] = pack_batch(b.ticks);
         commands.push_back({"ZADD", idx_key(b.symbol), std::to_string(b.first_ts),
                             idx_member(b.yyyymmdd, b.first_ts, b.last_ts)});
-        if (!opt.claim_lease) commands.push_back({"SET", state_key_of(id), "pending"});
+    }
+    // 状态 HASH（ADR-019）：S 批一条 HSET，命令数与符号数解耦
+    {
+        std::vector<std::string> hs{"HSET", state_key()};
+        hs.reserve(2 + batches.size() * 2);
+        for (const Batch& b : batches) {
+            hs.push_back(batch_id_of(b));
+            hs.push_back("pending");
+        }
+        commands.push_back(std::move(hs));
     }
 
     if (!newest.empty()) {
@@ -118,13 +133,21 @@ bool flush_batches(RespClient& rc, const std::vector<Batch>& batches, const Flus
 
 bool finish_written_batches(RespClient& rc, const std::vector<Batch>& batches) {
     if (!rc.connected() || batches.empty()) return false;
-    std::vector<std::vector<std::string>> commands;
-    commands.reserve(batches.size() * 2);
+    // ADR-019：收尾 = 一条 HSET（S 个 field→done）+ 一条多键 DEL——命令数与符号数解耦。
+    // 崩在中途：HSET 单命令原子生效，lease 残留靠 TTL 兜底（语义与逐键 SET 时代一致）。
+    std::vector<std::string> hs{"HSET", state_key()};
+    std::vector<std::string> del{"DEL"};
+    hs.reserve(2 + batches.size() * 2);
+    del.reserve(1 + batches.size());
     for (const Batch& b : batches) {
         const std::string id = batch_id_of(b);
-        commands.push_back({"SET", state_key_of(id), "done"});
-        commands.push_back({"DEL", lease_key_of(id)});
+        hs.push_back(id);
+        hs.push_back("done");
+        del.push_back(lease_key_of(id));
     }
+    std::vector<std::vector<std::string>> commands;
+    commands.push_back(std::move(hs));
+    commands.push_back(std::move(del));
     std::vector<RespValue> replies;
     if (!rc.exec(commands, replies) || replies.size() != commands.size()) return false;
     for (const RespValue& r : replies)
@@ -134,9 +157,11 @@ bool finish_written_batches(RespClient& rc, const std::vector<Batch>& batches) {
 
 bool release_claims(RespClient& rc, const std::vector<Batch>& batches) {
     if (!rc.connected() || batches.empty()) return false;
+    std::vector<std::string> del{"DEL"};
+    del.reserve(1 + batches.size());
+    for (const Batch& b : batches) del.push_back(lease_key_of(batch_id_of(b)));
     std::vector<std::vector<std::string>> commands;
-    commands.reserve(batches.size());
-    for (const Batch& b : batches) commands.push_back({"DEL", lease_key_of(batch_id_of(b))});
+    commands.push_back(std::move(del));  // 一条多键 DEL（ADR-019）
     std::vector<RespValue> replies;
     if (!rc.exec(commands, replies) || replies.size() != commands.size()) return false;
     return true;

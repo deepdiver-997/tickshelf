@@ -171,12 +171,20 @@
   5. **派生数据走旁路，flush 只内联零成本聚合**：`latest` 投影是"顺手聚合"（零计算成本）所以内联在 flush；任何有计算成本的派生（K 线聚合、指标）必须走独立消费者进程——薄入口 + libtickshelf 纯函数，即 persister/evictor/queryd 同款形态，绝不进 tickshelfd 的时间片。旁路的故障隔离与资源监控复用现成机制（进程边界 + `stats:{component}` 观测面），不需要新增设计——"旁路处理与主管线隔离 + 独立监控"的通用实践，在本项目里的对应物就是组件模型本身。
 - **代价**：版本戳是 DB 头部一个整数（无表无行），每次 open 多读一次 pragma；v1 残留（quote_key 辅助、两处文档的 ts: 行情键条目）随本 ADR 一并退役。
 
+## ADR-019 命令数与符号数解耦：状态键 HASH 化（2026-11-11）
+
+- **背景**：SYMS=5400 生产基数对照（benchmarks.md）暴露"flush 固定成本随符号数线性涨"——classic 摄入 2.2M→1.5M（−30%）。逐批 `state:{批id}` 键是主要贡献者：每 flush 3S+1 条命令 + 收尾 2S 条，5,400 符号时每轮 ~27k 命令的构建/编码/回复解析全在 daemon 主线程。
+- **分析**：段 SET 与 idx ZADD 按符号天然分键（查询按符号范围走 idx），无法合并；state 是纯标记（批id→pending/done），聚合进一个 HASH 后 flush 变一条 HSET（S 个 field）、收尾变一条 HSET + 一条多键 DEL、遍历走 HSCAN（SCAN 的键名前缀剥离坑随键形态消失）。租约**不能**跟进去：需要 per-key TTL（HSETNX 无 EX；HEXPIRE 要 Redis ≥7.4，不做版本耦合）。
+- **决定**：`state:{批id}` 逐批键退役 → `state` HASH（field=批id → pending/done）；finish/release 改单条多键 DEL；写穿认领块前置（连续 S 条 SETNX，claimed 步长 1，管道序仍保证 lease 先于 state HSET——ADR-012 仲裁前提不变）。语义不变：HSET/HDEL 原子性与逐键 SET 等价，崩溃窗口表逐行照旧。
+- **实测（SYMS=5400）**：classic 摄入 1.5M→**1.9M**（基数税 −30%→−14%）；写穿固定成本地板 70→51ms（50k 步 stall_max）。高步平台样本噪声大（2 采样窗/步），趋势不动结论。
+- **代价**：dev 期 flag-day（键空间形态变更，公开仓库无存量数据）；单 HASH 内存 ≈ 原 S 个小键（省每键键名头开销）；未来若需按批 TTL，HEXPIRE 是唯一路径（备案）。剩余的基数税（−14%）在 seg/ZADD 每符号一对命令 + 回复解析，进一步解耦需聚合键设计（备案观察）。
+
 ## 数据模型（Redis）
 
 - ~~行情键 `ts:{symbol}:{yyyymmdd}`（v1 逐 tick ZSET，member=64B Tick 原始字节）~~ — ADR-017 起退役（dev 期 flag-day 换段式；生产期格式迁移走 ADR-018 双读配方）
-- 租约键：`lease:{批id}` — SET NX EX，TTL 60s，worker 每 20s 续期
-- 状态键：`state:{批id}` — hash tag 共用前缀便于 SCAN；批id = `{symbol}:{yyyymmdd}:{首ts}-{尾ts}`
+- 租约键：`lease:{批id}` — SET NX EX，TTL 60s，worker 每 20s 续期（**保留逐批键形态**——需要 per-key TTL，HASH field 独立过期需 Redis ≥7.4 HEXPIRE，不做版本耦合）
+- 状态：`state`（HASH，field=批id → pending/done，ADR-019）——S 批一条 HSET/HDEL、遍历走 HSCAN；批id = `{symbol}:{yyyymmdd}:{首ts}-{尾ts}`
 - 最新价投影：`latest`（全局 HASH，field=symbol，value=64B tick 字节；flush 单条 HSET 聚合更新，回补不改——ADR-016）
 - 段（v2，ADR-017）：`seg:{批id}`（STRING，批内 tick 64B 打包）、索引 `idx:{symbol}`（ZSET，score=批首 ts，member=`{date}:{首}-{尾}`）
 - 回补键：`backfill:{sym}:{from}-{to}` — M3 懒触发回补的请求去重（SETNX，ADR-014），值 done/unrepairable
-- 设计约束：状态键必须可 SCAN（淘汰进程要遍历）、行情键必须可按 symbol 分片（未来扩展：全操作 per-symbol，天然可哈希路由）
+- 设计约束：状态必须可增量遍历（HSCAN，淘汰/落库进程都要遍历）、行情键必须可按 symbol 分片（未来扩展：全操作 per-symbol，天然可哈希路由）

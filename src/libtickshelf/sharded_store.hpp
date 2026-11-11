@@ -50,9 +50,10 @@ private:
     // 分片 = 文件 + 独占写线程 + 有界作业队列（完整类型放头文件：vector<unique_ptr<Shard>>
     // 作为成员，隐式析构在含本头的 TU 里实例化时需要 Shard 完整）。
     // 队列访问模式恒为 SPSC（upsert_flush 同步 ⇒ 单提交者串行 + 单写线程），mutex+cv
-    // 在 flush 节奏（~2 次/s/分片）下无竞争——队列成本 < stall 的 1%，99.9% 时间在
-    // SQLite 行处理/fsync。换无锁 SPSC（ADR-010 备案的 quantify 复用点）的触发条件：
-    // flush 节奏达千次/秒级（工作线程持久化逐 tick 交接）或队列操作进入 stall P99。
+    // 在 flush 节奏（~2 次/s/分片）下无竞争——队列深度结构性 ≤1（锁步：提交即等 future），
+    // 冲突在任何存储速度下都不可见。换无锁 SPSC（ADR-010 备案的 quantify 复用点）的
+    // 触发条件：flush 节奏达千次/秒级（工作线程持久化逐 tick 交接）或队列操作进入
+    // stall P99。完整分析（含批提交均摊与队列流量的解耦证明）见 design.md ADR-020 附录。
     struct Shard {
         SqliteTickStore store;
         std::thread worker;

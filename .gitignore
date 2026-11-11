@@ -1,0 +1,14 @@
+build/
+build-*/
+.cache/
+compile_commands.json
+cmake-build-*/
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+.zcode/
+.vscode/
+.local-docs/
+__pycache__/
+*.pyc

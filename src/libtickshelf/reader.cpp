@@ -14,10 +14,10 @@ bool is_bulk(const RespValue& v) { return v.type == RespValue::Type::Bulk; }
 
 }  // namespace
 
-RangeReader::RangeReader(RespClient& rc, SqliteTickStore& store)
+RangeReader::RangeReader(RespClient& rc, TickStore& store)
     : RangeReader(rc, store, Options{}) {}
 
-RangeReader::RangeReader(RespClient& rc, SqliteTickStore& store, Options opt)
+RangeReader::RangeReader(RespClient& rc, TickStore& store, Options opt)
     : rc_(rc), store_(store), opt_(opt) {}
 
 bool RangeReader::read_hot_side(const std::string& symbol, std::uint64_t from_ms,

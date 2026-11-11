@@ -12,7 +12,7 @@ bool is_bulk(const RespValue& v) { return v.type == RespValue::Type::Bulk; }
 
 }  // namespace
 
-LeasePersister::LeasePersister(RespClient& rc, SqliteTickStore& store, Options opt)
+LeasePersister::LeasePersister(RespClient& rc, TickStore& store, Options opt)
     : rc_(rc), store_(store), opt_(std::move(opt)) {}
 
 bool LeasePersister::parse_batch_id(const std::string& id, std::string& symbol,

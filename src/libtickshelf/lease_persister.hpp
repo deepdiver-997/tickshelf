@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "resp_client.hpp"
-#include "sqlite_store.hpp"
+#include "tick_store.hpp"
 
 namespace tickshelf {
 
@@ -34,7 +34,7 @@ public:
         std::uint64_t last_backlog = 0;  // 最近一轮 SCAN 到的 pending 批数（负载暴露，ADR-013）
     };
 
-    LeasePersister(RespClient& rc, SqliteTickStore& store, Options opt);
+    LeasePersister(RespClient& rc, TickStore& store, Options opt);
 
     // 单轮：SCAN state:* → GET 过滤 pending → 逐批认领处理。返回本轮处理批数。
     int poll_once();
@@ -52,7 +52,7 @@ private:
     int process_batch(const std::string& id);
 
     RespClient& rc_;
-    SqliteTickStore& store_;
+    TickStore& store_;
     Options opt_;
     Stats stats_;
 };

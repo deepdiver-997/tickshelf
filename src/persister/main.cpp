@@ -11,7 +11,7 @@
 #include "libtickshelf/ingestor.hpp"  // publish_stats（ADR-013）
 #include "libtickshelf/lease_persister.hpp"
 #include "libtickshelf/resp_client.hpp"
-#include "libtickshelf/sqlite_store.hpp"
+#include "libtickshelf/sharded_store.hpp"
 
 namespace {
 
@@ -26,6 +26,7 @@ int main(int argc, char** argv) {
     std::string db_path = "ticks.db";
     std::string worker = "persister";
     std::uint64_t poll_ms = 1000;
+    int shards = 1;
     bool once = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -35,11 +36,12 @@ int main(int argc, char** argv) {
         else if (a == "--db") db_path = argv[++i];
         else if (a == "--worker") worker = argv[++i];
         else if (a == "--poll-ms") poll_ms = std::strtoull(argv[++i], nullptr, 10);
+        else if (a == "--shards") shards = std::atoi(argv[++i]);
         else if (a == "--once") once = true;
         else {
             std::fprintf(stderr,
                          "usage: persister [--redis-host H] [--redis-port P] [--db PATH] "
-                         "[--worker ID] [--poll-ms MS] [--once]\n");
+                         "[--worker ID] [--poll-ms MS] [--shards N] [--once]\n");
             return 2;
         }
     }
@@ -47,16 +49,17 @@ int main(int argc, char** argv) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
-    tickshelf::SqliteTickStore store;
-    if (!store.open(db_path)) {
-        std::fprintf(stderr, "persister: cannot open db %s\n", db_path.c_str());
+    auto store = tickshelf::make_tick_store(shards);
+    if (!store->open(db_path)) {
+        std::fprintf(stderr, "persister: cannot open db %s (%d shards)\n", db_path.c_str(),
+                     shards);
         return 1;
     }
 
     tickshelf::RespClient rc;
     tickshelf::LeasePersister::Options opt;
     opt.worker_id = worker + "-" + std::to_string(getpid());
-    tickshelf::LeasePersister lp(rc, store, opt);
+    tickshelf::LeasePersister lp(rc, *store, opt);
 
     std::uint64_t next_stats = 0;
     std::uint64_t next_publish = 0;
@@ -92,7 +95,7 @@ int main(int argc, char** argv) {
                           static_cast<unsigned long long>(st.skipped),
                           static_cast<unsigned long long>(st.empty_batches),
                           static_cast<unsigned long long>(st.ticks_upserted),
-                          static_cast<unsigned long long>(store.count()));
+                          static_cast<unsigned long long>(store->count()));
             tickshelf::publish_stats(rc, "persister", body);
             next_publish = now_ms + 2000;
         }
@@ -109,7 +112,7 @@ int main(int argc, char** argv) {
                          static_cast<unsigned long long>(st.skipped),
                          static_cast<unsigned long long>(st.empty_batches),
                          static_cast<unsigned long long>(st.ticks_upserted),
-                         static_cast<unsigned long long>(store.count()));
+                         static_cast<unsigned long long>(store->count()));
             next_stats = now + 10000;
         }
 
@@ -118,13 +121,13 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(lp.stats().claimed),
                         static_cast<unsigned long long>(lp.stats().skipped),
                         static_cast<unsigned long long>(lp.stats().ticks_upserted),
-                        static_cast<unsigned long long>(store.count()));
+                        static_cast<unsigned long long>(store->count()));
             return 0;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
     }
 
     std::fprintf(stderr, "persister: stopping, total rows=%llu\n",
-                 static_cast<unsigned long long>(store.count()));
+                 static_cast<unsigned long long>(store->count()));
     return 0;
 }

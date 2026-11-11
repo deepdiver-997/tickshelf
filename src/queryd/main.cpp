@@ -22,6 +22,7 @@
 #include "common/net.hpp"
 #include "libtickshelf/frame_parser.hpp"
 #include "libtickshelf/reader.hpp"
+#include "libtickshelf/sharded_store.hpp"
 
 namespace {
 
@@ -44,6 +45,7 @@ struct QueryOptions {
     std::string redis_host = "127.0.0.1";
     std::uint16_t redis_port = 6379;
     std::string db = "ticks.db";
+    int shards = 1;  // 落库分片数（ADR-020）——必须与写入侧一致（纯函数路由）
 };
 
 struct QuerySession {
@@ -57,7 +59,7 @@ struct QuerySession {
 
 class QueryDaemon {
 public:
-    explicit QueryDaemon(const QueryOptions& opt) : opt_(opt) {}
+    QueryDaemon(const QueryOptions& opt, TickStore& store) : opt_(opt), store_(store) {}
 
     bool start() {
         listen_fd_.reset(net::tcp_listen(opt_.bind_host, opt_.port));
@@ -67,10 +69,6 @@ public:
             return false;
         }
         net::set_nonblock(listen_fd_.get(), true);
-        if (!store_.open(opt_.db)) {
-            std::fprintf(stderr, "queryd: cannot open db %s\n", opt_.db.c_str());
-            return false;
-        }
         if (!rc_.connect(opt_.redis_host, opt_.redis_port))
             std::fprintf(stderr, "queryd: redis unreachable at startup, will retry\n");
         return true;
@@ -225,7 +223,7 @@ private:
     net::UniqueFd listen_fd_;
     std::vector<QuerySession> sessions_;
     RespClient rc_;
-    SqliteTickStore store_;
+    TickStore& store_;  // 外部持有（main 按 --shards 装配，存活期覆盖本进程）
     RangeReader reader_{rc_, store_};
 };
 
@@ -240,10 +238,11 @@ int main(int argc, char** argv) {
         else if (a == "--redis-host") opt.redis_host = argv[++i];
         else if (a == "--redis-port") opt.redis_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (a == "--db") opt.db = argv[++i];
+        else if (a == "--shards") opt.shards = std::atoi(argv[++i]);
         else {
             std::fprintf(stderr,
                          "usage: queryd [--bind H] [--port P] [--redis-host H] [--redis-port P] "
-                         "[--db PATH]\n");
+                         "[--db PATH] [--shards N]\n");
             return 2;
         }
     }
@@ -252,7 +251,13 @@ int main(int argc, char** argv) {
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
 
-    QueryDaemon d(opt);
+    auto store = make_tick_store(opt.shards);
+    if (!store->open(opt.db)) {
+        std::fprintf(stderr, "queryd: cannot open db %s (%d shards)\n", opt.db.c_str(),
+                     opt.shards);
+        return 1;
+    }
+    QueryDaemon d(opt, *store);
     if (!d.start()) return 1;
     std::fprintf(stderr, "queryd: listening %s:%u, redis %s:%u, db %s\n", opt.bind_host.c_str(),
                  opt.port, opt.redis_host.c_str(), opt.redis_port, opt.db.c_str());

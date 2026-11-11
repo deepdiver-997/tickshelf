@@ -31,6 +31,7 @@ add_library(tickshelf_lib STATIC
   src/libtickshelf/lease_persister.cpp
   src/libtickshelf/reader.cpp
   src/libtickshelf/resp_client.cpp
+  src/libtickshelf/sharded_store.cpp
   src/libtickshelf/sqlite_store.cpp)
 target_include_directories(tickshelf_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(tickshelf_lib PUBLIC SQLite::SQLite3)
@@ -68,6 +69,7 @@ if(TICKSHELF_BUILD_TESTS)
     tests/test_civil.cpp
     tests/test_frame_parser.cpp
     tests/test_resp.cpp
+    tests/test_sharded_store.cpp
     tests/test_ingestor.cpp
     tests/test_lease_persister.cpp
     tests/test_evictor.cpp

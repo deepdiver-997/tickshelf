@@ -14,7 +14,7 @@
 
 #include "ingestor.hpp"  // 键空间：idx/backfill 约定
 #include "resp_client.hpp"
-#include "sqlite_store.hpp"
+#include "tick_store.hpp"
 
 namespace tickshelf {
 
@@ -36,8 +36,8 @@ public:
         std::uint64_t backfill_ttl_s = 600;
     };
 
-    explicit RangeReader(RespClient& rc, SqliteTickStore& store);
-    RangeReader(RespClient& rc, SqliteTickStore& store, Options opt);
+    explicit RangeReader(RespClient& rc, TickStore& store);
+    RangeReader(RespClient& rc, TickStore& store, Options opt);
 
     // false = Redis 连接/协议故障（out 仍含耐久侧结果，redis_ok=false）
     bool read(const std::string& symbol, std::uint64_t from_ms, std::uint64_t to_ms,
@@ -48,7 +48,7 @@ private:
                        std::vector<std::pair<std::uint64_t, std::string>>& out);
 
     RespClient& rc_;
-    SqliteTickStore& store_;
+    TickStore& store_;
     Options opt_;
 };
 

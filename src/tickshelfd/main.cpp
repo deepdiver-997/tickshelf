@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <memory>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -22,7 +23,7 @@
 #include "libtickshelf/frame_parser.hpp"
 #include "libtickshelf/ingestor.hpp"
 #include "libtickshelf/resp_client.hpp"
-#include "libtickshelf/sqlite_store.hpp"
+#include "libtickshelf/sharded_store.hpp"
 
 namespace {
 
@@ -62,6 +63,7 @@ struct Options {
     std::uint64_t flush_interval_ms = 500;  // ADR-003：固定冲刷间隔
     std::string persist = "none";           // none=classic（persister 读回）| sqlite=写穿（ADR-012）
     std::string db = "ticks.db";            // 写穿模式的 SQLite 路径
+    int shards = 1;                          // 落库分片数（ADR-020，>1 时文件 = db + "." + i）
 };
 
 struct DaemonStats {
@@ -93,8 +95,10 @@ public:
         }
         tickshelf::net::set_nonblock(listen_fd_.get(), true);
         if (opt_.persist == "sqlite") {
-            if (!store_.open(opt_.db)) {
-                std::fprintf(stderr, "tickshelfd: cannot open db %s\n", opt_.db.c_str());
+            store_ = tickshelf::make_tick_store(opt_.shards);
+            if (!store_->open(opt_.db)) {
+                std::fprintf(stderr, "tickshelfd: cannot open db %s (%d shards)\n",
+                             opt_.db.c_str(), opt_.shards);
                 return false;
             }
         }
@@ -281,7 +285,7 @@ private:
         mine.reserve(batches.size());
         for (std::size_t i = 0; i < batches.size(); ++i)
             if (claimed[i]) mine.push_back(&batches[i].ticks);  // 租约被他占：留给 persister
-        const std::int64_t ins = mine.empty() ? 0 : store_.upsert_flush(mine);
+        const std::int64_t ins = mine.empty() ? 0 : store_->upsert_flush(mine);
         const std::uint64_t stall = steady_ms() - t0;
         stats_.stall_sum_ms += stall;
         stats_.stall_max_ms = std::max(stats_.stall_max_ms, stall);
@@ -331,7 +335,7 @@ private:
     std::vector<ConnSession> sessions_;
     tickshelf::Ingestor ingestor_;
     tickshelf::RespClient rc_;
-    tickshelf::SqliteTickStore store_;
+    std::unique_ptr<tickshelf::TickStore> store_;  // N=1 单文件 / N>1 分片（ADR-020）
     DaemonStats stats_;
 };
 
@@ -355,11 +359,12 @@ int main(int argc, char** argv) {
         else if (a == "--flush-interval-ms") opt.flush_interval_ms = arg_u64(argv, i);
         else if (a == "--persist") opt.persist = argv[++i];
         else if (a == "--db") opt.db = argv[++i];
+        else if (a == "--shards") opt.shards = std::atoi(argv[++i]);
         else {
             std::fprintf(stderr,
                          "usage: tickshelfd [--bind H] [--port P] [--redis-host H] "
                          "[--redis-port P] [--flush-interval-ms MS] "
-                         "[--persist none|sqlite] [--db PATH]\n");
+                         "[--persist none|sqlite] [--db PATH] [--shards N]\n");
             return 2;
         }
     }

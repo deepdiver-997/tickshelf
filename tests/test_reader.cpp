@@ -7,6 +7,7 @@
 #include "common/civil.hpp"
 #include "libtickshelf/ingestor.hpp"
 #include "libtickshelf/reader.hpp"
+#include "libtickshelf/sqlite_store.hpp"
 
 using namespace tickshelf;
 

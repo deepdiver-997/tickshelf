@@ -24,6 +24,7 @@ add_library(tickshelf_lib STATIC
   src/common/crc32.cpp
   src/common/civil.cpp
   src/common/net.cpp
+  src/common/startup_config.cpp
   src/common/tick.cpp
   src/libtickshelf/evictor.cpp
   src/libtickshelf/frame_parser.cpp
@@ -64,6 +65,7 @@ if(TICKSHELF_BUILD_TESTS)
   add_executable(tickshelf_tests
     tests/main.cpp
     tests/test_smoke.cpp
+    tests/test_startup_config.cpp
     tests/test_crc32.cpp
     tests/test_tick.cpp
     tests/test_civil.cpp
@@ -76,6 +78,10 @@ if(TICKSHELF_BUILD_TESTS)
     tests/test_reader.cpp
     tests/test_write_through.cpp)
   target_include_directories(tickshelf_tests PRIVATE third_party)
+  target_compile_definitions(tickshelf_tests PRIVATE TICKSHELF_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(tickshelf_tests PRIVATE tickshelf_lib)
   add_test(NAME tickshelf_tests COMMAND tickshelf_tests)
+  # 配置测试完全离线；不要为验证配置而运行含共享 Redis 集成测试的完整套件。
+  add_test(NAME startup_config COMMAND tickshelf_tests "--test-case=startup_config:*")
+  set_tests_properties(startup_config PROPERTIES LABELS "unit;startup_config")
 endif()

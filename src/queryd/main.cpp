@@ -20,6 +20,7 @@
 #include "common/endian.hpp"
 #include "common/frame_writer.hpp"
 #include "common/net.hpp"
+#include "common/startup_config.hpp"
 #include "libtickshelf/frame_parser.hpp"
 #include "libtickshelf/reader.hpp"
 #include "libtickshelf/sharded_store.hpp"
@@ -39,14 +40,7 @@ std::uint64_t steady_ms() {
 
 constexpr std::uint64_t kIdleTimeoutMs = 30000;  // 查询客户端可长连，空闲阈值放宽
 
-struct QueryOptions {
-    std::string bind_host = "127.0.0.1";
-    std::uint16_t port = 9910;
-    std::string redis_host = "127.0.0.1";
-    std::uint16_t redis_port = 6379;
-    std::string db = "ticks.db";
-    int shards = 1;  // 落库分片数（ADR-020）——必须与写入侧一致（纯函数路由）
-};
+using QueryOptions = startup::Options;
 
 struct QuerySession {
     net::UniqueFd fd;
@@ -231,21 +225,9 @@ private:
 
 int main(int argc, char** argv) {
     QueryOptions opt;
-    for (int i = 1; i < argc; ++i) {
-        const std::string a = argv[i];
-        if (a == "--bind") opt.bind_host = argv[++i];
-        else if (a == "--port") opt.port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
-        else if (a == "--redis-host") opt.redis_host = argv[++i];
-        else if (a == "--redis-port") opt.redis_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
-        else if (a == "--db") opt.db = argv[++i];
-        else if (a == "--shards") opt.shards = std::atoi(argv[++i]);
-        else {
-            std::fprintf(stderr,
-                         "usage: queryd [--bind H] [--port P] [--redis-host H] [--redis-port P] "
-                         "[--db PATH] [--shards N]\n");
-            return 2;
-        }
-    }
+    const auto status = startup::configure(startup::Component::Queryd, argc, argv, opt);
+    if (status != startup::Status::Run)
+        return status == startup::Status::ExitSuccess ? 0 : 2;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);

@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 
+#include "common/startup_config.hpp"
 #include "libtickshelf/ingestor.hpp"  // publish_stats（ADR-013）
 #include "libtickshelf/lease_persister.hpp"
 #include "libtickshelf/resp_client.hpp"
@@ -21,53 +22,34 @@ void on_signal(int) { g_stop = 1; }
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string redis_host = "127.0.0.1";
-    std::uint16_t redis_port = 6379;
-    std::string db_path = "ticks.db";
-    std::string worker = "persister";
-    std::uint64_t poll_ms = 1000;
-    int shards = 1;
-    bool once = false;
-
-    for (int i = 1; i < argc; ++i) {
-        const std::string a = argv[i];
-        if (a == "--redis-host") redis_host = argv[++i];
-        else if (a == "--redis-port") redis_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
-        else if (a == "--db") db_path = argv[++i];
-        else if (a == "--worker") worker = argv[++i];
-        else if (a == "--poll-ms") poll_ms = std::strtoull(argv[++i], nullptr, 10);
-        else if (a == "--shards") shards = std::atoi(argv[++i]);
-        else if (a == "--once") once = true;
-        else {
-            std::fprintf(stderr,
-                         "usage: persister [--redis-host H] [--redis-port P] [--db PATH] "
-                         "[--worker ID] [--poll-ms MS] [--shards N] [--once]\n");
-            return 2;
-        }
-    }
+    tickshelf::startup::Options cfg;
+    const auto status = tickshelf::startup::configure(
+        tickshelf::startup::Component::Persister, argc, argv, cfg);
+    if (status != tickshelf::startup::Status::Run)
+        return status == tickshelf::startup::Status::ExitSuccess ? 0 : 2;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
-    auto store = tickshelf::make_tick_store(shards);
-    if (!store->open(db_path)) {
-        std::fprintf(stderr, "persister: cannot open db %s (%d shards)\n", db_path.c_str(),
-                     shards);
+    auto store = tickshelf::make_tick_store(cfg.shards);
+    if (!store->open(cfg.db)) {
+        std::fprintf(stderr, "persister: cannot open db %s (%d shards)\n", cfg.db.c_str(),
+                     cfg.shards);
         return 1;
     }
 
     tickshelf::RespClient rc;
     tickshelf::LeasePersister::Options opt;
-    opt.worker_id = worker + "-" + std::to_string(getpid());
+    opt.worker_id = cfg.worker + "-" + std::to_string(getpid());
     tickshelf::LeasePersister lp(rc, *store, opt);
 
     std::uint64_t next_stats = 0;
     std::uint64_t next_publish = 0;
     while (!g_stop) {
-        if (!rc.connected() && !rc.connect(redis_host, redis_port)) {
+        if (!rc.connected() && !rc.connect(cfg.redis_host, cfg.redis_port)) {
             std::fprintf(stderr, "persister: redis %s:%u unreachable, retry 1s\n",
-                         redis_host.c_str(), redis_port);
-            if (once) return 1;
+                         cfg.redis_host.c_str(), cfg.redis_port);
+            if (cfg.once) return 1;
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
@@ -75,8 +57,8 @@ int main(int argc, char** argv) {
         const int done = lp.poll_once();
         if (done < 0) {
             rc.close();  // 连接层错误：重连下轮再试（已处理批不受影响，幂等兜底）
-            if (once) return 1;
-            std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+            if (cfg.once) return 1;
+            std::this_thread::sleep_for(std::chrono::milliseconds(cfg.poll_ms));
             continue;
         }
 
@@ -116,7 +98,7 @@ int main(int argc, char** argv) {
             next_stats = now + 10000;
         }
 
-        if (once) {
+        if (cfg.once) {
             std::printf("DONE claimed=%llu skipped=%llu rows=%llu total=%llu\n",
                         static_cast<unsigned long long>(lp.stats().claimed),
                         static_cast<unsigned long long>(lp.stats().skipped),
@@ -124,7 +106,7 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(store->count()));
             return 0;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+        std::this_thread::sleep_for(std::chrono::milliseconds(cfg.poll_ms));
     }
 
     std::fprintf(stderr, "persister: stopping, total rows=%llu\n",

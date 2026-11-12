@@ -14,6 +14,7 @@
 #include <thread>
 
 #include "common/net.hpp"
+#include "common/startup_config.hpp"
 #include "libtickshelf/evictor.hpp"
 #include "libtickshelf/ingestor.hpp"  // publish_stats
 
@@ -49,56 +50,23 @@ bool daemon_ingested(RespClient& rc, std::uint64_t& ingested) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string redis_host = "127.0.0.1";
-    std::uint16_t redis_port = 6379;
-    std::uint64_t soft_bytes = 0;          // 0 = 必须显式给（水位语义不容含糊）
-    std::uint64_t emergency_bytes = 0;     // 0 = tier3 永不触发
-    std::uint64_t sample_ms = 1000;
-    std::uint64_t bytes_per_tick = 0;      // 0 = 跳过增速对账
-    double growth_tolerance_pct = 50.0;  // Redis 内存非线性（rehash 相位/state 键），30% 会误报
-    bool no_inflight = true;  // tier2 默认关（ADR-004 注记：stale lease × tier2 = 真丢窗口）
-
-    for (int i = 1; i < argc; ++i) {
-        const std::string a = argv[i];
-        if (a == "--redis-host") redis_host = argv[++i];
-        else if (a == "--redis-port") redis_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
-        else if (a == "--soft-watermark-bytes") soft_bytes = std::strtoull(argv[++i], nullptr, 10);
-        else if (a == "--emergency-watermark-bytes")
-            emergency_bytes = std::strtoull(argv[++i], nullptr, 10);
-        else if (a == "--sample-ms") sample_ms = std::strtoull(argv[++i], nullptr, 10);
-        else if (a == "--bytes-per-tick") bytes_per_tick = std::strtoull(argv[++i], nullptr, 10);
-        else if (a == "--growth-tolerance-pct") growth_tolerance_pct = std::atof(argv[++i]);
-        else if (a == "--inflight") no_inflight = false;
-        else {
-            std::fprintf(stderr,
-                         "usage: evictor [--redis-host H] [--redis-port P] "
-                         "--soft-watermark-bytes N [--emergency-watermark-bytes N] "
-                         "[--sample-ms MS] [--bytes-per-tick N --growth-tolerance-pct P] "
-                         "[--inflight]\n");
-            return 2;
-        }
-    }
-    if (soft_bytes == 0) {
-        std::fprintf(stderr, "evictor: --soft-watermark-bytes 必填（淘汰起点不容含糊）\n");
-        return 2;
-    }
-    if (emergency_bytes != 0 && emergency_bytes <= soft_bytes) {
-        std::fprintf(stderr, "evictor: emergency 水位必须高于 soft 水位\n");
-        return 2;
-    }
+    startup::Options cfg;
+    const auto status = startup::configure(startup::Component::Evictor, argc, argv, cfg);
+    if (status != startup::Status::Run)
+        return status == startup::Status::ExitSuccess ? 0 : 2;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
     RespClient rc;
-    if (!rc.connect(redis_host, redis_port)) {
-        std::fprintf(stderr, "evictor: redis %s:%u unreachable\n", redis_host.c_str(),
-                     redis_port);
+    if (!rc.connect(cfg.redis_host, cfg.redis_port)) {
+        std::fprintf(stderr, "evictor: redis %s:%u unreachable\n", cfg.redis_host.c_str(),
+                     cfg.redis_port);
         return 1;
     }
 
     Evictor::Options opt;
-    opt.allow_inflight_evict = !no_inflight;
+    opt.allow_inflight_evict = cfg.inflight;
     Evictor ev(rc, opt);
 
     // 对账状态
@@ -106,13 +74,13 @@ int main(int argc, char** argv) {
     std::uint64_t recon_ingested = 0, recon_used = 0, recon_freed = 0;
 
     std::fprintf(stderr, "evictor: soft=%llu emergency=%llu inflight=%d sample=%llums\n",
-                 static_cast<unsigned long long>(soft_bytes),
-                 static_cast<unsigned long long>(emergency_bytes), !no_inflight,
-                 static_cast<unsigned long long>(sample_ms));
+                 static_cast<unsigned long long>(cfg.soft_watermark_bytes),
+                 static_cast<unsigned long long>(cfg.emergency_watermark_bytes), cfg.inflight,
+                 static_cast<unsigned long long>(cfg.sample_ms));
 
     while (!g_stop) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(sample_ms));
-        if (!rc.connected() && !rc.connect(redis_host, redis_port)) continue;
+        std::this_thread::sleep_for(std::chrono::milliseconds(cfg.sample_ms));
+        if (!rc.connected() && !rc.connect(cfg.redis_host, cfg.redis_port)) continue;
 
         std::uint64_t used = 0;
         if (!info_used_memory(rc, used)) {
@@ -126,7 +94,7 @@ int main(int argc, char** argv) {
                       "used=%llu;soft=%llu;runs=%llu;segs=%llu;states=%llu;"
                       "emergency=%llu;batches=%llu",
                       static_cast<unsigned long long>(used),
-                      static_cast<unsigned long long>(soft_bytes),
+                      static_cast<unsigned long long>(cfg.soft_watermark_bytes),
                       static_cast<unsigned long long>(st.runs),
                       static_cast<unsigned long long>(st.segs_deleted),
                       static_cast<unsigned long long>(st.states_deleted),
@@ -137,7 +105,7 @@ int main(int argc, char** argv) {
         // 预测/实测对账（ADR-007）：累计口径——起点锚定后比较 (Δingested × bytes/tick)
         // 与 (Δused_memory)。短窗口增量会被分配器页粒度平滑，必须累计足够 ticks 再裁决；
         // 只在无淘汰的窗口比较（淘汰本身会压内存，口径不成立）。
-        if (bytes_per_tick > 0) {
+        if (cfg.bytes_per_tick > 0) {
             std::uint64_t ingested = 0;
             const bool has_ing = daemon_ingested(rc, ingested);
             if (!recon_has && has_ing) {  // 锚定起点
@@ -151,16 +119,16 @@ int main(int argc, char** argv) {
                                             static_cast<std::int64_t>(recon_used);
                 const bool no_eviction = recon_freed == st.segs_deleted;
                 if (no_eviction && d_ticks >= 5000 && d_used > 0) {
-                    const double predicted = static_cast<double>(d_ticks) * bytes_per_tick;
+                    const double predicted = static_cast<double>(d_ticks) * cfg.bytes_per_tick;
                     const double dev =
                         (static_cast<double>(d_used) - predicted) / predicted * 100.0;
-                    if (dev > growth_tolerance_pct || dev < -growth_tolerance_pct) {
+                    if (dev > cfg.growth_tolerance_pct || dev < -cfg.growth_tolerance_pct) {
                         std::fprintf(stderr,
                                      "evictor: 增速偏差 %.0f%%（实测 %lldB vs 预测 %.0fB，"
                                      "%llu ticks × %lluB/tick）——查配置漂移或内存账错误\n",
                                      dev, static_cast<long long>(d_used), predicted,
                                      static_cast<unsigned long long>(d_ticks),
-                                     static_cast<unsigned long long>(bytes_per_tick));
+                                     static_cast<unsigned long long>(cfg.bytes_per_tick));
                         // 重锚：告警一次后从当前点重新累计，避免每采样重复刷屏
                         recon_ingested = ingested;
                         recon_used = used;
@@ -170,13 +138,14 @@ int main(int argc, char** argv) {
             recon_freed = st.segs_deleted;
         }
 
-        if (used < soft_bytes) continue;  // 水下：零打扰
+        if (used < cfg.soft_watermark_bytes) continue;  // 水下：零打扰
 
-        const bool emergency = emergency_bytes != 0 && used >= emergency_bytes;
+        const bool emergency = cfg.emergency_watermark_bytes != 0 &&
+                               used >= cfg.emergency_watermark_bytes;
         if (emergency)
             std::fprintf(stderr, "evictor: 紧急水位 %llu ≥ %llu，tier3 启用（真丢）\n",
                          static_cast<unsigned long long>(used),
-                         static_cast<unsigned long long>(emergency_bytes));
+                         static_cast<unsigned long long>(cfg.emergency_watermark_bytes));
         if (!ev.run_once(emergency)) {
             rc.close();
             continue;

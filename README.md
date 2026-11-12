@@ -43,10 +43,25 @@ driver(任意语言) ──TCP·TTAP──▶ tickshelfd ──RESP──▶ Red
 ```bash
 cmake -B build
 cmake --build build
-ctest --test-dir build --output-on-failure   # 测试（核心库直连单测；Redis 集成用例不可达时自动跳过）
+./build/tickshelf_tests --test-case-exclude='*redis-server*'   # 不连接共享 Redis 的单元测试
 ```
 
-四进程管线（M1 垂直切片）：
+部分既有 Redis 集成用例固定连接 `127.0.0.1:6379` 并清空 DB 15；完整 CTest 只能在专用测试环境运行，不能把“Redis 不可达会跳过”当成隔离保障。
+
+**同一份配置启动四个服务**（Redis 须已就绪）：
+
+```bash
+python3 scripts/run_stack.py --build build --config examples/tickshelf.ini
+# 前台运行；Ctrl-C 停止并等待自身子进程，不停止外部 Redis。
+# 单服务仍可独立运行，显式 CLI 覆盖文件：
+./build/tickshelfd --config examples/tickshelf.ini --port 9920
+./build/persister --config examples/tickshelf.ini --print-config  # 只校验/打印，不建库
+```
+
+配置语法、路径与覆盖规则见 [docs/configuration.md](docs/configuration.md)。
+可选外部 JSON mock 的私有 Redis 全链演练/压测见 [docs/real-source-sim.md](docs/real-source-sim.md)。
+
+原有 CLI 用法不变（M1 垂直切片）：
 
 ```bash
 ./build/tickshelfd --flush-interval-ms 300        # 接入守护进程（收 TTAP 帧 → 攒批 → Redis）

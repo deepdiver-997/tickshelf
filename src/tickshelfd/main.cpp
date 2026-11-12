@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "common/net.hpp"
+#include "common/startup_config.hpp"
 #include "libtickshelf/frame_parser.hpp"
 #include "libtickshelf/ingestor.hpp"
 #include "libtickshelf/resp_client.hpp"
@@ -55,16 +56,7 @@ struct ConnSession {
     bool dead = false;
 };
 
-struct Options {
-    std::string bind_host = "127.0.0.1";
-    std::uint16_t port = 9900;
-    std::string redis_host = "127.0.0.1";
-    std::uint16_t redis_port = 6379;
-    std::uint64_t flush_interval_ms = 500;  // ADR-003：固定冲刷间隔
-    std::string persist = "none";           // none=classic（persister 读回）| sqlite=写穿（ADR-012）
-    std::string db = "ticks.db";            // 写穿模式的 SQLite 路径
-    int shards = 1;                          // 落库分片数（ADR-020，>1 时文件 = db + "." + i）
-};
+using Options = tickshelf::startup::Options;
 
 struct DaemonStats {
     std::uint64_t conns_total = 0;
@@ -339,39 +331,14 @@ private:
     DaemonStats stats_;
 };
 
-std::uint16_t arg_u16(char** argv, int& i) {
-    return static_cast<std::uint16_t>(std::atoi(argv[++i]));
-}
-std::uint64_t arg_u64(char** argv, int& i) {
-    return static_cast<std::uint64_t>(std::strtoull(argv[++i], nullptr, 10));
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
     Options opt;
-    for (int i = 1; i < argc; ++i) {
-        const std::string a = argv[i];
-        if (a == "--bind") opt.bind_host = argv[++i];
-        else if (a == "--port") opt.port = arg_u16(argv, i);
-        else if (a == "--redis-host") opt.redis_host = argv[++i];
-        else if (a == "--redis-port") opt.redis_port = arg_u16(argv, i);
-        else if (a == "--flush-interval-ms") opt.flush_interval_ms = arg_u64(argv, i);
-        else if (a == "--persist") opt.persist = argv[++i];
-        else if (a == "--db") opt.db = argv[++i];
-        else if (a == "--shards") opt.shards = std::atoi(argv[++i]);
-        else {
-            std::fprintf(stderr,
-                         "usage: tickshelfd [--bind H] [--port P] [--redis-host H] "
-                         "[--redis-port P] [--flush-interval-ms MS] "
-                         "[--persist none|sqlite] [--db PATH] [--shards N]\n");
-            return 2;
-        }
-    }
-    if (opt.persist != "none" && opt.persist != "sqlite") {
-        std::fprintf(stderr, "tickshelfd: --persist must be none|sqlite\n");
-        return 2;
-    }
+    const auto status = tickshelf::startup::configure(
+        tickshelf::startup::Component::Tickshelfd, argc, argv, opt);
+    if (status != tickshelf::startup::Status::Run)
+        return status == tickshelf::startup::Status::ExitSuccess ? 0 : 2;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);

@@ -80,9 +80,11 @@ public:
             const int rc = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), 500);
             if (rc < 0 && errno != EINTR) break;
             const std::uint64_t now2 = steady_ms();
-
+            // accept 前快照：pfds 只覆盖快照时的会话；accept_conns 追加的新连接
+            // 下轮再服务——按新 size 索引旧 pfds 是越界读（UB）。
+            const std::size_t ready = sessions_.size();
             if (pfds[0].revents & POLLIN) accept_conns(now2);
-            for (std::size_t i = 0; i < sessions_.size(); ++i) {
+            for (std::size_t i = 0; i < ready; ++i) {
                 QuerySession& s = sessions_[i];
                 const short rev = pfds[1 + i].revents;
                 if (rev & POLLOUT) flush_out(s);

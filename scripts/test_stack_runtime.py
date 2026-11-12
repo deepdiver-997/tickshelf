@@ -12,10 +12,13 @@ import sys
 import tempfile
 import time
 import unittest
+import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from ifind_sim_bench import BASE_TS, Observer, parse_source, percentile, shard_for, write_config
+from ifind_sim_bench import (BASE_TS, HEADER, TICK, Observer, connect_readonly,
+                             parse_source, percentile, shard_for, write_config)
 from stack_runtime import (OwnedProcesses, RedisConnection, RunError, candidate_ports,
                            start_private_redis, wait_until)
 
@@ -165,6 +168,85 @@ class StartupTests(unittest.TestCase):
                 pass
             daemon_log = self.directory / "failed-services/tickshelfd.log"
             self.assertFalse(daemon_log.exists(), "launch should stop at queryd failure")
+
+
+class WriteThroughTests(unittest.TestCase):
+    """写穿收尾精确性回归（2026-11-12 审计）：
+
+    认领失败的批（租约被他占 = 别人的在途批）不得被 daemon 代标 done/删租约——
+    旧行为会让 persister 永久跳过该批、tier1 淘汰按 done=已落库删段 → 静默丢数据。
+    只用本轮私有 Redis，不碰 6379。
+    """
+
+    def setUp(self):
+        if RUNTIME_ONLY:
+            self.skipTest("runtime-only requested; write-through not tested")
+        self.temp = tempfile.TemporaryDirectory(prefix="tickshelf-wt-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.owner = OwnedProcesses(self.directory / "infra")
+        self.addCleanup(self.owner.close)
+        self.redis_port, self.daemon_port = candidate_ports(2)
+        start_private_redis(self.owner, shutil.which("redis-server"), self.redis_port)
+        self.config = self.directory / "wt.ini"
+        write_config(self.config, (self.redis_port, self.daemon_port, self.daemon_port),
+                     "sqlite", 1, flush_ms=50, poll_ms=50)
+        date = datetime.fromtimestamp(BASE_TS / 1000, timezone.utc).strftime("%Y%m%d")
+        self.batch_id = f"600000:{date}:{BASE_TS}-{BASE_TS}"
+        with RedisConnection("127.0.0.1", self.redis_port) as rc:
+            # 预置外部租约：daemon flush 的 SETNX 必然失败 → 该批成为"别人的在途批"
+            rc.command("SET", f"lease:{self.batch_id}", "external", "EX", "60")
+
+    def sqlite_count(self):
+        db = self.directory / "ticks.db"
+        if not db.exists():
+            return 0
+        with connect_readonly(db) as conn:
+            return conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+
+    def run_persister_once(self):
+        return subprocess.run([BUILD / "persister", "--config", self.config, "--once"],
+                              capture_output=True, text=True, timeout=15)
+
+    def send_one_tick(self):
+        payload = TICK.pack(b"600000", BASE_TS, BASE_TS, 10005000, 10006000,
+                            10005500, 100, 200, 50, 0)
+        frame = HEADER.pack(b"TTAP", 1, 0, 1, 0, 0, len(payload),
+                            zlib.crc32(payload) & 0xFFFFFFFF) + payload
+        self.owner.start("tickshelfd", [BUILD / "tickshelfd", "--config", self.config])
+        wait_until(lambda: "listening " in self.owner.text("tickshelfd"),
+                   processes=self.owner, names=("redis", "tickshelfd"))
+        with socket.create_connection(("127.0.0.1", self.daemon_port), timeout=2) as sock:
+            sock.sendall(frame)
+        time.sleep(0.5)  # > flush 间隔，flush 必已发生
+        self.owner.stop("tickshelfd")
+
+    def test_unclaimed_batch_not_marked_done_by_daemon(self):
+        self.send_one_tick()
+        with RedisConnection("127.0.0.1", self.redis_port) as rc:
+            self.assertEqual(rc.command("HGET", "state", self.batch_id), b"pending")
+            self.assertEqual(rc.command("GET", f"lease:{self.batch_id}"), b"external")
+        self.assertEqual(self.sqlite_count(), 0)  # daemon 没写不属于自己的批
+
+        with RedisConnection("127.0.0.1", self.redis_port) as rc:
+            rc.command("DEL", f"lease:{self.batch_id}")
+        done = self.run_persister_once()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("claimed=1", done.stdout)
+        self.assertEqual(self.sqlite_count(), 1)
+        with RedisConnection("127.0.0.1", self.redis_port) as rc:
+            self.assertEqual(rc.command("HGET", "state", self.batch_id), b"done")
+
+    def test_missing_segment_alarms_instead_of_silent_empty(self):
+        ghost = "600000:19990101:111-111"
+        with RedisConnection("127.0.0.1", self.redis_port) as rc:
+            rc.command("HSET", "state", ghost, "pending")
+        done = self.run_persister_once()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("claimed=1", done.stdout)
+        self.assertIn("rows=0", done.stdout)   # 无段可落
+        self.assertIn("段缺失", done.stderr)   # 丢数据必须显式告警，不是静默空批成功
+        # empty_batches（=缺段计数）走周期统计行与 stats:persister 键，不在 DONE 行
 
 
 if __name__ == "__main__":

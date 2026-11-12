@@ -109,10 +109,18 @@ bool flush_batches(RespClient& rc, const std::vector<Batch>& batches,
 // 写穿收尾：[SET state done, DEL lease] ×N 合并一条 pipeline。崩在中途：
 // state 已 done 则不重做；仅 lease 残留靠 TTL 兜底。
 bool finish_written_batches(RespClient& rc, const std::vector<Batch>& batches);
+// 按 id 的精确版本（daemon 写穿路径用）：只对「本进程认领并落库」的批收尾。
+// 全量收尾会把认领失败的批（租约被他占 = 别人的在途批）也标 done——persister
+// 从此跳过它、tier1 淘汰按"done=必然已落库"删段（ADR-017）→ 静默丢数据。
+// 空集合 = 无操作成功。
+bool finish_written_batch_ids(RespClient& rc, const std::vector<std::string>& batch_ids);
 
 // 放弃认领（SQLite 故障降级）：[DEL lease] ×N——批回到无主 pending，
 // persister 走读回路径接手，数据已在 Redis，不重发不重灌。
 bool release_claims(RespClient& rc, const std::vector<Batch>& batches);
+// 按 id 的精确版本：只删自己的租约。删他占的租约破坏仲裁（在途 worker 被抢跑
+// 重复劳动，tier2 stale-lease 丢数据窗口被放大）。空集合 = 无操作成功。
+bool release_claim_ids(RespClient& rc, const std::vector<std::string>& batch_ids);
 
 // 负载暴露（ADR-013）：组件把 stats:{component} 写成 k=v;... 自过期键（EX ttl）。
 // 只做观测不做控制——在线模式切换的取舍见 ADR-013。发布失败静默（观测不反噬主流程）。

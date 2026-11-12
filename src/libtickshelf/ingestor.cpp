@@ -131,16 +131,16 @@ bool flush_batches(RespClient& rc, const std::vector<Batch>& batches, const Flus
     return true;
 }
 
-bool finish_written_batches(RespClient& rc, const std::vector<Batch>& batches) {
-    if (!rc.connected() || batches.empty()) return false;
+bool finish_written_batch_ids(RespClient& rc, const std::vector<std::string>& batch_ids) {
+    if (!rc.connected()) return !batch_ids.empty();
+    if (batch_ids.empty()) return true;  // 没有自己认领的批 = 无收尾（精确集合语义）
     // ADR-019：收尾 = 一条 HSET（S 个 field→done）+ 一条多键 DEL——命令数与符号数解耦。
     // 崩在中途：HSET 单命令原子生效，lease 残留靠 TTL 兜底（语义与逐键 SET 时代一致）。
     std::vector<std::string> hs{"HSET", state_key()};
     std::vector<std::string> del{"DEL"};
-    hs.reserve(2 + batches.size() * 2);
-    del.reserve(1 + batches.size());
-    for (const Batch& b : batches) {
-        const std::string id = batch_id_of(b);
+    hs.reserve(2 + batch_ids.size() * 2);
+    del.reserve(1 + batch_ids.size());
+    for (const std::string& id : batch_ids) {
         hs.push_back(id);
         hs.push_back("done");
         del.push_back(lease_key_of(id));
@@ -155,16 +155,31 @@ bool finish_written_batches(RespClient& rc, const std::vector<Batch>& batches) {
     return true;
 }
 
-bool release_claims(RespClient& rc, const std::vector<Batch>& batches) {
-    if (!rc.connected() || batches.empty()) return false;
+bool finish_written_batches(RespClient& rc, const std::vector<Batch>& batches) {
+    std::vector<std::string> ids;
+    ids.reserve(batches.size());
+    for (const Batch& b : batches) ids.push_back(batch_id_of(b));
+    return finish_written_batch_ids(rc, ids);
+}
+
+bool release_claim_ids(RespClient& rc, const std::vector<std::string>& batch_ids) {
+    if (!rc.connected()) return !batch_ids.empty();
+    if (batch_ids.empty()) return true;  // 无自有认领 = 无释放
     std::vector<std::string> del{"DEL"};
-    del.reserve(1 + batches.size());
-    for (const Batch& b : batches) del.push_back(lease_key_of(batch_id_of(b)));
+    del.reserve(1 + batch_ids.size());
+    for (const std::string& id : batch_ids) del.push_back(lease_key_of(id));
     std::vector<std::vector<std::string>> commands;
     commands.push_back(std::move(del));  // 一条多键 DEL（ADR-019）
     std::vector<RespValue> replies;
     if (!rc.exec(commands, replies) || replies.size() != commands.size()) return false;
     return true;
+}
+
+bool release_claims(RespClient& rc, const std::vector<Batch>& batches) {
+    std::vector<std::string> ids;
+    ids.reserve(batches.size());
+    for (const Batch& b : batches) ids.push_back(batch_id_of(b));
+    return release_claim_ids(rc, ids);
 }
 
 bool publish_stats(RespClient& rc, const std::string& component, const std::string& body,

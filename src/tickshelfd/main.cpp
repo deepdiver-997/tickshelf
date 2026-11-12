@@ -117,9 +117,13 @@ public:
             if (rc < 0 && errno != EINTR) break;
 
             const std::uint64_t now2 = steady_ms();
+            // accept 前快照：pfds 只覆盖快照时的会话。accept_conns 会向 sessions_
+            // 追加新连接，旧代码按新 size 索引旧 pfds → 越界读（UB，ASAN 必炸）。
+            // 新连接下轮 poll 再服务（timeout ≤500ms 本就是巡检节奏）。
+            const std::size_t ready = sessions_.size();
             if (pfds[0].revents & POLLIN) accept_conns(now2);
 
-            for (std::size_t i = 0; i < sessions_.size(); ++i) {
+            for (std::size_t i = 0; i < ready; ++i) {
                 const short rev = pfds[1 + i].revents;
                 if (rev & (POLLIN | POLLHUP | POLLERR)) read_session(sessions_[i], now2, ticks);
                 if (!sessions_[i].dead && now2 - sessions_[i].last_rx_ms > kHeartbeatTimeoutMs) {
@@ -232,7 +236,8 @@ private:
     //
     // 写穿模式（ADR-012 修订）：flush pipeline 即认领租约（lease→state→ZADD 顺序，
     // persister 抢占被仲裁挡下）→ 内联 SQLite upsert（同步阻塞主循环，时长计入
-    // stall 统计）→ 批量标记 done。SQLite 故障 → release_claims 降级回读回路径。
+    // stall 统计）→ 仅认领成功的批标记 done/删租约（按 mine_ids 精确集合）。
+    // SQLite 故障 → release_claim_ids 只放自己的认领，降级回读回路径。
     void flush(std::uint64_t now) {
         (void)now;
         if (!rc_.connected() && !rc_.connect(opt_.redis_host, opt_.redis_port)) return;
@@ -271,27 +276,33 @@ private:
         // flush 级合并事务（ADR-012 修订）：全部已认领批一次 BEGIN…COMMIT，fsync
         // 从每批一次降到每 flush 一次——实测 stall 地板 64ms（256 符号 × ~0.25ms
         // fsync，仅地板就越过 ADR-013 的 10% 预算触发线）→ 亚毫秒。故障回滚半径
-        // 从单批扩大到整个 flush，恢复语义不变（release_claims → persister 读回）。
+        // 从单批扩大到整个 flush，恢复语义不变（release_claim_ids → persister 读回）。
         const std::uint64_t t0 = steady_ms();
         std::vector<const std::vector<tickshelf::Tick>*> mine;
+        std::vector<std::string> mine_ids;  // 精确集合：只有这份批允许被收尾/放弃认领
         mine.reserve(batches.size());
         for (std::size_t i = 0; i < batches.size(); ++i)
-            if (claimed[i]) mine.push_back(&batches[i].ticks);  // 租约被他占：留给 persister
+            if (claimed[i]) {
+                mine.push_back(&batches[i].ticks);  // 租约被他占：留给 persister
+                mine_ids.push_back(tickshelf::batch_id_of(batches[i]));
+            }
         const std::int64_t ins = mine.empty() ? 0 : store_->upsert_flush(mine);
         const std::uint64_t stall = steady_ms() - t0;
         stats_.stall_sum_ms += stall;
         stats_.stall_max_ms = std::max(stats_.stall_max_ms, stall);
         ++stats_.stall_count;
 
-        if (ins < 0) {  // SQLite 故障：整 flush 放弃认领，退回读回路径
-            tickshelf::release_claims(rc_, batches);  // 批回无主 pending，persister 接手
+        if (ins < 0) {  // SQLite 故障：只放弃自己的认领，退回读回路径
+            tickshelf::release_claim_ids(rc_, mine_ids);  // 他占的租约不动——那是别人的在途批
             ++stats_.flush_errors;
             std::fprintf(stderr, "tickshelfd: sqlite write failed, %zu batches released\n",
-                         batches.size());
+                         mine_ids.size());
             return;
         }
         stats_.rows_upserted += static_cast<std::uint64_t>(ins);
-        if (!tickshelf::finish_written_batches(rc_, batches)) {
+        // 收尾只标自己写过的批：全量标 done 会把"租约被他占"的在途批也标完成——
+        // persister 从此跳过、tier1 淘汰按 done=已落库删段（ADR-017）→ 静默丢数据
+        if (!tickshelf::finish_written_batch_ids(rc_, mine_ids)) {
             rc_.close();  // 数据已落库；state/lease 由 TTL+persister 最终收尾
             ++stats_.flush_errors;
             return;

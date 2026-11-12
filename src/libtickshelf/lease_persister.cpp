@@ -76,7 +76,17 @@ int LeasePersister::process_batch(const std::string& id) {
         ++stats_.skipped;
         return 0;
     }
-    // Null 段 = "标记落了、段没落"（classic 半管道崩溃窗口）→ 空批路径标 done（ADR-019：HSET field）
+    // Null 段 = pending 批的段已不存在——数据不可恢复，按 done 收尾防止 backlog
+    // 永久热循环（ADR-019：HSET field）；但这是真实的丢数据事件，必须显式告警，
+    // 不能伪装成正常空批。成因更正：现行管道顺序 seg 先于 state HSET
+    // （build_flush_commands），半管道截断只会产生"有段无 state"（扫描不可见，
+    // 同批 id 下次 flush 自愈），产生不了"有 state 无段"；真实来源 = tier2 在飞
+    // 淘汰×stale lease（ADR-004 注记）、人为删除等。empty_batches 实际就是缺段
+    // 计数——drain 不产生空批。
+    if (r[1].type == RespValue::Type::Null)
+        std::fprintf(stderr,
+                     "persister: pending 批 %s 段缺失，数据已不可恢复，按 done 收尾\n",
+                     id.c_str());
     if (r[1].type != RespValue::Type::Bulk && r[1].type != RespValue::Type::Null) return -1;
 
     // 读批：段是本批 tick 的全体（1:1），逐 64B 解码。无重叠脏读问题（旧 ZSET

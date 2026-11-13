@@ -69,6 +69,8 @@ if(TICKSHELF_BUILD_TESTS)
     tests/test_crc32.cpp
     tests/test_tick.cpp
     tests/test_civil.cpp
+    tests/test_interval_set.cpp
+    tests/test_coverage_ledger.cpp
     tests/test_frame_parser.cpp
     tests/test_resp.cpp
     tests/test_sharded_store.cpp

@@ -273,10 +273,10 @@ private:
             return;
         }
 
-        // flush 级合并事务（ADR-012 修订）：全部已认领批一次 BEGIN…COMMIT，fsync
-        // 从每批一次降到每 flush 一次——实测 stall 地板 64ms（256 符号 × ~0.25ms
-        // fsync，仅地板就越过 ADR-013 的 10% 预算触发线）→ 亚毫秒。故障回滚半径
-        // 从单批扩大到整个 flush，恢复语义不变（release_claim_ids → persister 读回）。
+        // flush 级合并事务（ADR-012 修订）：全部已认领批一次 BEGIN…COMMIT，减少
+        // 事务边界，FULL 连接下也摊薄同步次数。历史 64ms→亚毫秒是总 stall 观察，
+        // 不是单独 fsync 计时；此路径未设置 synchronous，实际值需回读，不能假定 FULL。
+        // 故障回滚半径扩大到整个 flush，恢复语义不变（release_claim_ids → persister 读回）。
         const std::uint64_t t0 = steady_ms();
         std::vector<const std::vector<tickshelf::Tick>*> mine;
         std::vector<std::string> mine_ids;  // 精确集合：只有这份批允许被收尾/放弃认领

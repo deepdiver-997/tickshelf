@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <thread>
+#include <utility>
 
 namespace tickshelf {
 namespace {
@@ -82,6 +83,35 @@ bool SqliteTickStore::open(const std::string& path) {
     sqlite3_close(db_);
     db_ = nullptr;
     return false;
+}
+
+bool SqliteTickStore::connection_info(SqliteConnectionInfo& out) const {
+    if (db_ == nullptr) return false;
+    SqliteConnectionInfo info;
+    info.version = sqlite3_libversion();
+    auto integer = [&](const char* sql, int& value) {
+        sqlite3_stmt* statement = nullptr;
+        const bool ok = sqlite3_prepare_v2(db_, sql, -1, &statement, nullptr) == SQLITE_OK &&
+                        sqlite3_step(statement) == SQLITE_ROW;
+        if (ok) value = sqlite3_column_int(statement, 0);
+        sqlite3_finalize(statement);
+        return ok;
+    };
+    sqlite3_stmt* statement = nullptr;
+    const bool journal_ok = sqlite3_prepare_v2(db_, "PRAGMA journal_mode", -1, &statement, nullptr) == SQLITE_OK &&
+                            sqlite3_step(statement) == SQLITE_ROW;
+    if (journal_ok) {
+        const auto* text = sqlite3_column_text(statement, 0);
+        if (text == nullptr) { sqlite3_finalize(statement); return false; }
+        info.journal_mode = reinterpret_cast<const char*>(text);
+    }
+    sqlite3_finalize(statement);
+    if (!journal_ok || !integer("PRAGMA synchronous", info.synchronous) ||
+        !integer("PRAGMA fullfsync", info.fullfsync) ||
+        !integer("PRAGMA checkpoint_fullfsync", info.checkpoint_fullfsync) ||
+        !integer("PRAGMA wal_autocheckpoint", info.wal_autocheckpoint)) return false;
+    out = std::move(info);
+    return true;
 }
 
 std::int64_t SqliteTickStore::upsert_flush(const std::vector<const std::vector<Tick>*>& batches) {

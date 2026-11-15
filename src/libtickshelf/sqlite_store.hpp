@@ -18,6 +18,16 @@ namespace tickshelf {
 // 旧二进制遇新格式库要响亮失败，不能拿旧字段偏移静默误解码。
 constexpr int kStoreFormatVersion = 1;
 
+// 只读连接诊断：PRAGMA 属于连接状态，不能用另开连接或编译期默认代替实测。
+struct SqliteConnectionInfo {
+    std::string version;
+    std::string journal_mode;
+    int synchronous = -1;
+    int fullfsync = -1;
+    int checkpoint_fullfsync = -1;
+    int wal_autocheckpoint = -1;
+};
+
 class SqliteTickStore : public TickStore {
 public:
     SqliteTickStore() = default;
@@ -28,13 +38,15 @@ public:
     // path = ":memory:" 或文件路径；false = 打开/建表失败（含格式版本不匹配）。
     // 打开即切 WAL：多进程并发（daemon 写穿 + persister 补偿）靠文件锁串行化写，
     // 读写不互斥——"单写者"是同时单写者（ADR-005 注记），本项目的写频次无争用。
+    // 此生产路径未显式设置 synchronous；不能假定为 FULL，实际值用 connection_info 回读。
     bool open(const std::string& path) override;
+    bool connection_info(SqliteConnectionInfo& out) const;
 
     // 批量幂等 upsert（单事务）。返回新插入行数（被唯一键忽略的不计）；-1 = SQLite 故障。
     std::int64_t upsert_batch(const std::vector<Tick>& ticks) override;
 
-    // flush 级合并事务（ADR-012 修订）：多批一次 BEGIN…COMMIT——fsync 从每批一次降到
-    // 每 flush 一次（256 符号时 = 256×fsync → 1×，写穿 stall 地板 64ms → 亚毫秒）。
+    // flush 级合并事务（ADR-012 修订）：多批一次 BEGIN…COMMIT，减少事务边界；
+    // FULL 连接下也摊薄 WAL 同步次数。历史 64ms→亚毫秒是总 stall 观察，非独立 fsync 测量。
     // 批指针列表（不拷贝 tick 数据）；任一步失败回滚整个 flush（回滚半径 = 全部批，
     // 恢复语义不变：release_claims → persister 读回，幂等 upsert 吃掉重做）。
     // 返回新插入行数合计；-1 = SQLite 故障（已回滚）。

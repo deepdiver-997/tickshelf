@@ -4,6 +4,16 @@
 > loopback、homebrew Redis、单机单进程。改动负载/代码/环境后重跑脚本更新数字。
 > 所有数字可复现（每行标了命令）；没有对账链的吞吐数字不进本页（讲故事不算数）。
 
+## 2026-11-13 耐久口径更正
+
+新增 `pipeline_sqlite_probe` 在 **SqliteTickStore 原连接**直接回读：本机运行期 SQLite 3.43.2 的实际配置是 **WAL + synchronous=1（NORMAL）**，不是根据通用默认值推断的 FULL；生产路径没有显式设置 synchronous。不能用另开连接、CMake 头文件版本、`DEFAULT_SYNCHRONOUS=2`（还存在独立 WAL 默认）代替原连接测量。生产默认行为未被此次诊断改动。
+
+下列历史数字保留为当时负载/实现的观察，但没有同步级别回读证据的结果**不能作为 FULL 掉电耐久条件下的容量承诺**，也不能将每个 COMMIT 的总耗时直接叫 fsync。新的五档变长 Record 实验显式设并验证 WAL+FULL，记录 prepare/step/commit、自动 checkpoint 栈与库容变化，见 [pipeline-benchmark.md](pipeline-benchmark.md) 和 [pipeline-bench-results.md](pipeline-bench-results.md)。跨格式、跨硬件、跨库容和耐久语义不能直接比较。Release 的实际优化 flags 以保存的 target 编译命令为准，不假定固定为 -O2。
+
+## 2026-11-14 五档完整链路优化复核
+
+见 [独立优化报告](pipeline-optimization-20261114.md) 与 [机器证据](pipeline-optimization-20261114.json)：四布局各百万条三轮全内容核对；5,400 证券、363 万条、34.603秒实际完成观察，文件＋SQLite FULL 稀疏索引（fullfsync=1）端到端104,904条/s通过100k硬floor。达标依赖32,768条/250ms吞吐优先批量，不代表全记录SQLite也达标、低延迟通过或目标硬件已被测。原生RocksDB同步库参考与网络全链路成绩分开列示，旧结果不覆盖。
+
 ## 方法论（口径纪律）
 
 1. **同负载 A/B**：只改一个变量（存储布局/持久化模式），其余钉死——`read_bench.sh`、`bench_compare.sh` 是这个纪律的产物。

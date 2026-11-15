@@ -195,6 +195,21 @@
   5. **载荷**：tick 数据不经过队列（Job.batches 指向 demux 缓冲，payload shared_ptr 保活），队列元素已是指针尺寸小对象；unique_ptr 包装在锁版下无收益（deque 节点独立分配，move 零拷贝）；promise/future 的每 flush 堆分配同理（N 分片 × 2 次/s）。
   结论：mutex+cv 保留；触发条件（千次/秒级 flush 或队列操作进 stall P99）钉死在 sharded_store.hpp 注释。
 
+## ADR-021 性能诊断双轨：原始五档 JSON 实验不改变生产契约（2026-11-13）
+
+- **背景**：目标服务器出现 3–5k 条/s 的落库吞吐，规范化文件读取加 hash/查重约 40k 条/s；既有 TTAP 64B 一档 Tick 的合成结果不足以代表五档变长 Record、前置内容去重和 SQLite FULL 的组合。仅采 CPU 栈也不足以解释提交、锁与磁盘等待。
+- **决定**：保持 ADR-006/009 的生产边界，不接真实账号和业务数据；新增默认不构建的 `bench/` 双进程实验台。按公开 iQuant 手册的 quoter 字段构造原始 JSON，经 TCP、simdjson、变长 canonical Record、逐记录 hash/查重、Redis 到耐久存储；实验 JSON 包装和 IQB1/RCD1 格式不宣称为官方导出或网络协议。现有四服务完整链路另行回归，不用实验程序冒充原管线。短路、记录/字节/等待封顶、实际 PRAGMA、独立 oracle、同轮采样和版本/构建证据由实验配置驱动；仅消费模式不得计作持久化。批 hash 对照明确为逐记录同算法、SHA context 复用，并不减少实际摘要记录数。
+- **存储对照**：SQLite FULL 全记录表与追加段文件加 SQLite FULL 的 symbol/time 段级稀疏索引保存同一 canonical 内容。文件先同步，再提交索引，最后确认；索引须具备范围读取能力，不能省略真实索引工作来美化结果。恢复验证已索引段及其范围索引，仅未索引尾部允许回收。该后端是实验原型，不替换生产 TickStore，也不承诺硬件 PLP 或已完成物理断电验证。
+- **代价**：新增 simdjson/OpenSSL 仅为可选实验依赖；JSON 到 Record 使用严格已声明 schema，不支持的字段拒绝而非静默丢弃。实验 Redis 是隔离的暂存/读回阶段，不实现四服务的租约补偿；字段覆盖与协议兼容性必须分开描述。稀疏索引减少索引行，但范围查询需读候选段并过滤，追加文件还增加独立同步/恢复成本；性能优劣由同耐久条件实测决定。阶段 timer 存在嵌套，禁止直接求和；本机吞吐不能证明目标部署达标，需在目标服务器另跑 30k offered-rate 稳态与长跑。
+
+## ADR-022 五档实验台的紧凑键、同步索引与硬容量验收（2026-11-14）
+
+- **背景**：宽 canonical BLOB 主键的 SQLite FULL 基线不能代表紧凑数据库；短跑也没有覆盖库容、checkpoint 与 FIFO 驱逐。Mac 100k 条/s 是工程目标，不是目标环境 30k 的硬件换算系数。
+- **决定**：保留宽表基线，新增独立 schema2 的 rowid 全记录表，固定32B非唯一 SHA-256 索引仅筛候选，完整内容决定相等；二级索引不再复制大 BLOB。可信内部摘要复用必须以业务字节未变为前提，Redis 下游仍来自真实 GET，并经过完整 canonical 验证。批中、重放、并发 writer 和强制摘要碰撞分别测试。
+- **文件＋索引**：TSG1 数据文件先同步，SQLite FULL 或 RocksDB WAL+sync WriteBatch 再原子提交完整批索引及高水位，之后才 ACK。相同 symbol/time 稀疏范围与恢复/尾回收合同，不省查询索引；保持物理重复与逻辑去重的区别。RocksDB 为可选固定版本实验依赖，不替换生产 TickStore。必要 flush/compaction 等待/SyncWAL/close 在完成计时内；数据文件与索引没有跨资源原子事务。开源固定源码、Mac 底层同步差异与 RTTI 构建根因见 [rocksdb-reference-20261114.md](rocksdb-reference-20261114.md)。
+- **验收**：完整原始五档 JSON、真实解析、SHA-256 查重、Redis roundtrip、FULL、零重复基线与声明证券基数缺一不可。硬 floor 使用包含最终 ACK 的端到端唯一完成率，实际发送至少10秒，并同时检查供给、积压与尾部；不能把 95% offered 或短跑当作100k通过。最大批量不是实际批量，按各阶段真实剩余队首记录记龄，独立记录 rows/bytes/age/tail 触发与实际事务大小。
+- **代价与边界**：摘要缓存为有预算的 FIFO 窗口；单份 payload 和固定开销记账不等于 RSS 上限。稀疏索引节省写入，但增加候选段读取/过滤及启动恢复工作。全记录 SQL 布局和追加文件不是相同物理去重合同；宏观 fsync 名称也不代表相同硬件承诺。先以可关闭布局/批量对照取证；没有证据需要时不增加后台 checkpoint 或异步派生索引，更不降低 FULL 来换成绩。
+
 ## 数据模型（Redis）
 
 - ~~行情键 `ts:{symbol}:{yyyymmdd}`（v1 逐 tick ZSET，member=64B Tick 原始字节）~~ — ADR-017 起退役（dev 期 flag-day 换段式；生产期格式迁移走 ADR-018 双读配方）

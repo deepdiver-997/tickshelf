@@ -61,6 +61,22 @@ python3 scripts/run_stack.py --build build --config examples/tickshelf.ini
 配置语法、路径与覆盖规则见 [docs/configuration.md](docs/configuration.md)。
 可选外部 JSON mock 的私有 Redis 全链演练/压测见 [docs/real-source-sim.md](docs/real-source-sim.md)。
 
+**五档 JSON / 变长 Record 性能实验台（可选，非生产 TTAP 接口）**：
+
+**默认输入全部是合成行情，不是真实生产捕获。** `backend=rocksdb` 已将完整记录接入 JSON/TCP/hash/真实 Redis 链路；原文捕获回放、独立对账、来源分级及数据库/syscall 口径见 [全记录基准说明](docs/full-record-benchmark.md)。正确性或合成容量 PASS 不代表生产基准合格。
+
+全记录 SQLite/RocksDB 的百万条三轮、SQLite 判重 SQL 优化及 60 秒容量复核见 [全记录实测报告](docs/full-record-results-20261114.md)（[机器证据](docs/full-record-results-20261114.json)）。Mac 全记录 100k 目标仍未达到；下文旧 104,904 条/s 成绩属于“文件＋SQLite 稀疏索引”，不是全记录数据库成绩。
+
+```bash
+# 额外依赖：simdjson >= 5、OpenSSL Crypto；普通服务构建不需要。
+cmake -S . -B build-bench-release -DCMAKE_BUILD_TYPE=Release -DTICKSHELF_BUILD_BENCHMARKS=ON
+cmake --build build-bench-release
+./build-bench-release/tickshelf_bench_tests
+python3 scripts/pipeline_bench.py --build build-bench-release --suite smoke --output /tmp/tickshelf-pipeline-smoke  # 结果目录须不存在
+```
+
+原始 JSON → TCP → simdjson → 完整五档 Record → hash/查重 → 私有 Redis → SQLite FULL 或追加文件＋稀疏索引，支持 `--matrix` JSON 轴组合、配置化消融、文件直读对照、独立 oracle 与同轮异常触发采样。官方字段来源、实验包装边界、服务器矩阵和耐久说明见 [docs/pipeline-benchmark.md](docs/pipeline-benchmark.md)，第一轮诊断与未达标记录见 [docs/pipeline-bench-results.md](docs/pipeline-bench-results.md)，紧凑 SQLite、同步 RocksDB 对照及 5,400 证券/363 万条/实际 104,904 条每秒的有限验收见 [2026-11-14 优化报告](docs/pipeline-optimization-20261114.md)。新 `--min-durable-rps` 对完整 JSON/五档/SHA/Redis/FULL 执行绝对完成率验收；不把阶段消费完成算作持久化，不把本机结果等同于目标部署环境容量。
+
 原有 CLI 用法不变（M1 垂直切片）：
 
 ```bash

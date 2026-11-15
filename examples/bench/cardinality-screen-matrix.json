@@ -1,0 +1,11 @@
+{
+  "cases": [
+    {"name": "segment_5400_r1024", "set": {"backend": "segment", "symbols": 5400, "redis_batch_records": 1024}},
+    {"name": "segment_5400_r8192", "set": {"backend": "segment", "symbols": 5400, "redis_batch_records": 8192}},
+    {"name": "rocks_5400_r1024", "set": {"backend": "segment_rocksdb", "symbols": 5400, "redis_batch_records": 1024}},
+    {"name": "rocks_5400_r8192", "set": {"backend": "segment_rocksdb", "symbols": 5400, "redis_batch_records": 8192}},
+    {"name": "segment_5400_large_txn", "set": {"backend": "segment", "symbols": 5400, "redis_batch_records": 8192, "transaction_rows": 32768, "transaction_bytes": 16777216, "transaction_ms": 250}},
+    {"name": "rocks_5400_large_txn", "set": {"backend": "segment_rocksdb", "symbols": 5400, "redis_batch_records": 8192, "transaction_rows": 32768, "transaction_bytes": 16777216, "transaction_ms": 250}},
+    {"name": "segment_54_fullfsync", "set": {"backend": "segment", "symbols": 54, "sqlite_fullfsync": "on"}}
+  ]
+}

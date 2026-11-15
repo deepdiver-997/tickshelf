@@ -1,0 +1,7 @@
+{
+  "cases": [
+    {"name": "sqlite_wide", "set": {"backend": "sqlite"}},
+    {"name": "sqlite_compact", "set": {"backend": "sqlite_compact"}},
+    {"name": "rocksdb_full", "set": {"backend": "rocksdb"}}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "axes": {
+    "transaction_rows": [16, 256, 1000, 4000],
+    "redis": ["roundtrip", "off"]
+  }
+}

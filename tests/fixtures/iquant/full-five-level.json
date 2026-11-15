@@ -1,0 +1,27 @@
+{
+  "ticks": [
+    {
+      "symbol": "600000.SH",
+      "time": 1700000000000,
+      "quoter": {
+        "lastPrice": 10.1234,
+        "amount": 125000.5678,
+        "volume": 12345,
+        "pvolumn": 12200,
+        "openInt": 100,
+        "stockStatus": 2,
+        "lastSettlementPrice": 9.8765,
+        "open": 10,
+        "high": 10.5,
+        "low": 9.5,
+        "settlementPrice": 10.01,
+        "lastClose": 9.99,
+        "transactionNum": 456,
+        "askPrice": [10.1235, 10.1236, 10.1237, 10.1238, 10.1239],
+        "bidPrice": [10.1233, 10.1232, 10.1231, 10.1230, 10.1229],
+        "askVol": [11, 22, 33, 44, 55],
+        "bidVol": [66, 77, 88, 99, 110]
+      }
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "ticks": [
+    {
+      "quoter": {
+        "bidVol": [30, 40],
+        "pvolume": 1.2200e4,
+        "askPrice": [1.01235e1, 10.12360000],
+        "lastPrice": 101234e-4,
+        "openInt": null,
+        "amount": null,
+        "bidPrice": [10.1233, 10.1232],
+        "askVol": [10, 20]
+      },
+      "time": 1.700000000001e12,
+      "symbol": "\u6d66\u53d1\u0000\"\\\n\ud83d\ude80.SH"
+    },
+    {
+      "symbol": "空档.SH",
+      "quoter": {"askPrice": [], "bidPrice": [], "askVol": [], "bidVol": []},
+      "time": 0
+    },
+    {
+      "symbol": "缺省.SH",
+      "time": 18446744073709551615,
+      "quoter": {"askPrice": null, "bidVol": null, "stockStatus": null}
+    }
+  ]
+}

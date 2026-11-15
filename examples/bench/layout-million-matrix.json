@@ -1,0 +1,8 @@
+{
+  "cases": [
+    {"name": "wide_batched", "set": {"backend": "sqlite"}},
+    {"name": "compact_batched", "set": {"backend": "sqlite_compact"}},
+    {"name": "segment_batched", "set": {"backend": "segment"}},
+    {"name": "rocks_index_batched", "set": {"backend": "segment_rocksdb"}}
+  ]
+}

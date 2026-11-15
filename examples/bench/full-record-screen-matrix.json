@@ -1,0 +1,10 @@
+{
+  "cases": [
+    {"name": "wide_1000", "set": {"backend": "sqlite", "transaction_rows": 1000}},
+    {"name": "compact_1000", "set": {"backend": "sqlite_compact", "transaction_rows": 1000}},
+    {"name": "rocks_1000", "set": {"backend": "rocksdb", "transaction_rows": 1000}},
+    {"name": "wide_8192", "set": {"backend": "sqlite", "transaction_rows": 8192}},
+    {"name": "compact_8192", "set": {"backend": "sqlite_compact", "transaction_rows": 8192}},
+    {"name": "rocks_8192", "set": {"backend": "rocksdb", "transaction_rows": 8192}}
+  ]
+}

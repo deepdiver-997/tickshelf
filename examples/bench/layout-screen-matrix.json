@@ -1,0 +1,12 @@
+{
+  "cases": [
+    {"name": "wide_default", "set": {"backend": "sqlite"}},
+    {"name": "compact_default", "set": {"backend": "sqlite_compact"}},
+    {"name": "segment_default", "set": {"backend": "segment"}},
+    {"name": "rocks_index_default", "set": {"backend": "segment_rocksdb"}},
+    {"name": "wide_batched", "set": {"backend": "sqlite", "batch_records": 1024, "hash_batch_records": 1024, "redis_batch_records": 1024, "transaction_rows": 8192, "transaction_bytes": 4194304}},
+    {"name": "compact_batched", "set": {"backend": "sqlite_compact", "batch_records": 1024, "hash_batch_records": 1024, "redis_batch_records": 1024, "transaction_rows": 8192, "transaction_bytes": 4194304}},
+    {"name": "segment_batched", "set": {"backend": "segment", "batch_records": 1024, "hash_batch_records": 1024, "redis_batch_records": 1024, "transaction_rows": 8192, "transaction_bytes": 4194304}},
+    {"name": "rocks_index_batched", "set": {"backend": "segment_rocksdb", "batch_records": 1024, "hash_batch_records": 1024, "redis_batch_records": 1024, "transaction_rows": 8192, "transaction_bytes": 4194304}}
+  ]
+}

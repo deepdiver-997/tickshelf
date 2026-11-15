@@ -1,0 +1,7 @@
+{
+  "cases": [
+    {"name": "compact_subquery", "set": {"backend": "sqlite_compact", "sqlite_compact_lookup": "subquery"}},
+    {"name": "compact_separate", "set": {"backend": "sqlite_compact", "sqlite_compact_lookup": "separate"}},
+    {"name": "rocksdb_full", "set": {"backend": "rocksdb", "sqlite_compact_lookup": "subquery"}}
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "symbols": 54,
+  "depth": 5,
+  "seed": 42,
+  "optional_fields": false,
+  "duplicate_every": 0,
+  "batch_records": 256,
+  "hash_batch_records": 256,
+  "redis_batch_records": 256,
+  "parse": "real",
+  "hash": "dedup",
+  "hash_mode": "batch",
+  "hash_algorithm": "sha256",
+  "redis": "roundtrip",
+  "backend": "sqlite",
+  "synchronous": "FULL",
+  "transaction_model": "light",
+  "reuse_statement": true,
+  "autocheckpoint": 1000,
+  "transaction_rows": 1000,
+  "transaction_bytes": 1048576,
+  "transaction_ms": 100
+}

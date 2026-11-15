@@ -1,0 +1,21 @@
+{
+  "input": "json",
+  "parse": "real",
+  "depth": 5,
+  "symbols": 5400,
+  "optional_fields": false,
+  "duplicate_every": 0,
+  "hash": "dedup",
+  "hash_mode": "batch",
+  "hash_algorithm": "sha256",
+  "redis": "roundtrip",
+  "backend": "segment",
+  "synchronous": "FULL",
+  "sqlite_fullfsync": "on",
+  "batch_records": 1024,
+  "hash_batch_records": 1024,
+  "redis_batch_records": 8192,
+  "transaction_rows": 32768,
+  "transaction_bytes": 16777216,
+  "transaction_ms": 250
+}

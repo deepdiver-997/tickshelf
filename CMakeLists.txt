@@ -11,6 +11,11 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(TICKSHELF_BUILD_TESTS "Build tickshelf tests" ON)
+option(TICKSHELF_BUILD_BENCHMARKS "Build isolated JSON/Record pipeline experiments" OFF)
+option(TICKSHELF_BENCH_ROCKSDB "Build pinned RocksDB benchmark/index comparison" OFF)
+if(TICKSHELF_BENCH_ROCKSDB AND NOT TICKSHELF_BUILD_BENCHMARKS)
+  message(FATAL_ERROR "TICKSHELF_BENCH_ROCKSDB requires TICKSHELF_BUILD_BENCHMARKS")
+endif()
 
 if(NOT MSVC)
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -35,7 +40,11 @@ add_library(tickshelf_lib STATIC
   src/libtickshelf/sharded_store.cpp
   src/libtickshelf/sqlite_store.cpp)
 target_include_directories(tickshelf_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(tickshelf_lib PUBLIC SQLite::SQLite3)
+if(TARGET SQLite3::SQLite3)
+  target_link_libraries(tickshelf_lib PUBLIC SQLite3::SQLite3)
+else()
+  target_link_libraries(tickshelf_lib PUBLIC SQLite::SQLite3)
+endif()
 
 # 守护进程（ADR-009 第二层）、租约落盘进程与参考驱动（第三层示例）
 add_executable(tickshelfd src/tickshelfd/main.cpp)
@@ -59,6 +68,38 @@ target_link_libraries(feedgen PRIVATE tickshelf_lib)
 # 灌流驱动（benchmarks.md 未测清单 #1 的工具）：极限摄入基准源，不受 1ms ts 网格限制
 add_executable(floodgen src/floodgen/main.cpp)
 target_link_libraries(floodgen PRIVATE tickshelf_lib)
+
+if(TICKSHELF_BUILD_BENCHMARKS)
+  # Optional, local dependencies only. Normal service builds do not need either.
+  find_package(simdjson 5 CONFIG REQUIRED)
+  find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+  add_library(tickshelf_bench_lib STATIC
+    bench/config.cpp
+    bench/hash.cpp
+    bench/protocol.cpp
+    bench/pipeline.cpp
+    bench/record.cpp
+    bench/store.cpp
+    bench/rocks_record_store.cpp)
+  target_include_directories(tickshelf_bench_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/bench)
+  target_link_libraries(tickshelf_bench_lib PUBLIC tickshelf_lib simdjson::simdjson OpenSSL::Crypto)
+  add_executable(pipeline_bench bench/main.cpp)
+  target_link_libraries(pipeline_bench PRIVATE tickshelf_bench_lib)
+  add_executable(pipeline_sqlite_probe bench/sqlite_probe.cpp)
+  target_link_libraries(pipeline_sqlite_probe PRIVATE tickshelf_lib)
+  if(TICKSHELF_BENCH_ROCKSDB)
+    find_package(RocksDB 11.13.2 EXACT CONFIG REQUIRED)
+    target_link_libraries(tickshelf_bench_lib PUBLIC RocksDB::rocksdb)
+    target_compile_definitions(tickshelf_bench_lib PUBLIC TICKSHELF_HAVE_ROCKSDB=1)
+    add_executable(rocks_reference bench/rocks_reference.cpp)
+    target_link_libraries(rocks_reference PRIVATE tickshelf_bench_lib RocksDB::rocksdb)
+  endif()
+  if(NOT MSVC)
+    # Keep the measured optimized binary usable for same-run stack sampling.
+    target_compile_options(tickshelf_bench_lib PRIVATE -g -fno-omit-frame-pointer)
+    target_compile_options(pipeline_bench PRIVATE -g -fno-omit-frame-pointer)
+  endif()
+endif()
 
 if(TICKSHELF_BUILD_TESTS)
   enable_testing()
@@ -86,4 +127,14 @@ if(TICKSHELF_BUILD_TESTS)
   # 配置测试完全离线；不要为验证配置而运行含共享 Redis 集成测试的完整套件。
   add_test(NAME startup_config COMMAND tickshelf_tests "--test-case=startup_config:*")
   set_tests_properties(startup_config PROPERTIES LABELS "unit;startup_config")
+  if(TICKSHELF_BUILD_BENCHMARKS)
+    add_executable(tickshelf_bench_tests tests/main.cpp
+      tests/test_bench_record.cpp tests/test_bench_store.cpp tests/test_bench_pipeline.cpp
+      tests/test_bench_runtime.cpp tests/test_bench_rocks_record.cpp tests/test_bench_sqlite_lookup.cpp)
+    target_include_directories(tickshelf_bench_tests PRIVATE third_party)
+    target_compile_definitions(tickshelf_bench_tests PRIVATE TICKSHELF_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(tickshelf_bench_tests PRIVATE tickshelf_bench_lib)
+    add_test(NAME pipeline_bench_unit COMMAND tickshelf_bench_tests)
+    set_tests_properties(pipeline_bench_unit PROPERTIES LABELS "unit;benchmark")
+  endif()
 endif()

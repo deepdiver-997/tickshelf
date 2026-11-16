@@ -46,6 +46,19 @@ public:
         return true;
     }
 
+    // 阻塞直到有空位或超时；关闭/超时返回 false。
+    bool push_wait_for(T value, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!not_full_.wait_for(lock, timeout,
+                                [&] { return closed_ || items_.size() < capacity_; }))
+            return false;
+        if (closed_) return false;
+        items_.push_back(std::move(value));
+        lock.unlock();
+        not_empty_.notify_one();
+        return true;
+    }
+
     // 阻塞直到有元素；关闭且排空后返回 false。
     bool pop_wait(T& out) {
         std::unique_lock<std::mutex> lock(mutex_);

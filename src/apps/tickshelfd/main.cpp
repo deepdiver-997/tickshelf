@@ -8,6 +8,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <memory>
@@ -16,15 +17,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <vector>
 
 #include "common/net.hpp"
 #include "common/startup_config.hpp"
+#include "components/engine/engine.hpp"
+#include "components/engine/write_policy.hpp"
 #include "components/ingest/frame_parser.hpp"
 #include "components/ingest/ingestor.hpp"
+#include "components/redis/redis_shard_pool.hpp"
 #include "components/redis/resp_client.hpp"
 #include "components/storage/sharded_store.hpp"
+#include "components/storage/storage_shard_pool.hpp"
 
 namespace {
 
@@ -45,6 +51,10 @@ constexpr std::uint64_t kHeartbeatTimeoutMs = 5000;  // protocol.md：5s 无任�
 // 64KB → 循环继续），无配额 = 单个高速客户端可无限推迟 flush，pending 在内存里无限膨胀。
 // 配额用尽即让出（数据留内核，下轮 poll 立刻可读），总吞吐不变，flush 节奏有界。
 constexpr std::uint64_t kSessionReadBudgetBytes = 1 << 20;  // 1MB，64KB 的整数倍
+
+// Engine 背压：submit 拒绝的尾部留在 retry buffer；超过上限就不再 poll 会话
+// （数据留内核，TCP 窗口反压 driver），等 worker 排空后恢复读取。
+constexpr std::size_t kMaxEngineRetryTicks = 65536;
 
 // ConnSession（ADR-011 传输层）：每 TCP 连接一个——字节缓冲在内核，
 // 帧状态机随连接生死；与 Ingestor（数据层，随 symbol/交易日生死）分离。
@@ -86,7 +96,9 @@ public:
             return false;
         }
         tickshelf::net::set_nonblock(listen_fd_.get(), true);
-        if (opt_.persist == "sqlite") {
+        if (opt_.engine) {
+            if (!start_engine()) return false;
+        } else if (opt_.persist == "sqlite") {
             store_ = tickshelf::make_tick_store(opt_.shards);
             if (!store_->open(opt_.db)) {
                 std::fprintf(stderr, "tickshelfd: cannot open db %s (%d shards)\n",
@@ -99,6 +111,7 @@ public:
 
     int run() {
         std::uint64_t next_flush = steady_ms() + opt_.flush_interval_ms;
+        std::uint64_t next_engine = steady_ms() + engine_tick_interval();
         std::uint64_t next_stats = steady_ms() + 10000;
         std::uint64_t next_publish = steady_ms() + 2000;
         std::vector<pollfd> pfds;
@@ -106,11 +119,16 @@ public:
 
         while (!g_stop) {
             const std::uint64_t now = steady_ms();
+            // Engine 背压时不再 poll 会话：数据留内核，避免"可读但故意不读"的忙循环。
+            const bool engine_backpressure =
+                engine_ && retry_ticks_.size() >= kMaxEngineRetryTicks;
             pfds.clear();
             pfds.push_back({listen_fd_.get(), POLLIN, 0});
-            for (const ConnSession& s : sessions_) pfds.push_back({s.fd.get(), POLLIN, 0});
+            if (!engine_backpressure)
+                for (const ConnSession& s : sessions_) pfds.push_back({s.fd.get(), POLLIN, 0});
 
-            std::uint64_t timeout = next_flush > now ? next_flush - now : 0;
+            const std::uint64_t next_deadline = engine_ ? next_engine : next_flush;
+            std::uint64_t timeout = next_deadline > now ? next_deadline - now : 0;
             timeout = std::min<std::uint64_t>(timeout, 500);  // 心跳巡检上限
             const int rc = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()),
                                   static_cast<int>(timeout));
@@ -120,7 +138,7 @@ public:
             // accept 前快照：pfds 只覆盖快照时的会话。accept_conns 会向 sessions_
             // 追加新连接，旧代码按新 size 索引旧 pfds → 越界读（UB，ASAN 必炸）。
             // 新连接下轮 poll 再服务（timeout ≤500ms 本就是巡检节奏）。
-            const std::size_t ready = sessions_.size();
+            const std::size_t ready = engine_backpressure ? 0 : sessions_.size();
             if (pfds[0].revents & POLLIN) accept_conns(now2);
 
             for (std::size_t i = 0; i < ready; ++i) {
@@ -134,7 +152,12 @@ public:
             }
             compact();
 
-            if (now2 >= next_flush) {
+            if (engine_) {
+                if (now2 >= next_engine) {
+                    engine_pump(now2);
+                    next_engine = now2 + engine_tick_interval();
+                }
+            } else if (now2 >= next_flush) {
                 flush(now2);
                 next_flush = now2 + opt_.flush_interval_ms;
             }
@@ -144,32 +167,138 @@ public:
             }
             // 负载暴露（ADR-013）：观测用，发布失败静默
             if (now2 >= next_publish) {
-                char body[256];
+                char body[512];
                 const std::uint64_t stall_avg =
                     stats_.stall_count ? stats_.stall_sum_ms / stats_.stall_count : 0;
+                const tickshelf::EngineStats engine_stats =
+                    engine_ ? engine_->stats() : tickshelf::EngineStats{};
+                const std::uint64_t pending =
+                    engine_ ? engine_stats.pending_records : ingestor_.pending_ticks();
+                const std::uint64_t rows =
+                    engine_ ? engine_stats.durable_records : stats_.rows_upserted;
                 std::snprintf(body, sizeof(body),
-                              "persist=%s;ingested=%llu;pending=%llu;flushes=%llu;"
+                              "persist=%s;engine=%s;ingested=%llu;pending=%llu;flushes=%llu;"
                               "flush_err=%llu;rows=%llu;stall_avg=%llu;stall_max=%llu",
-                              opt_.persist.c_str(),
+                              opt_.persist.c_str(), engine_ ? "on" : "off",
                               static_cast<unsigned long long>(stats_.ticks_ingested),
-                              static_cast<unsigned long long>(ingestor_.pending_ticks()),
+                              static_cast<unsigned long long>(pending),
                               static_cast<unsigned long long>(stats_.flushes_ok),
                               static_cast<unsigned long long>(stats_.flush_errors),
-                              static_cast<unsigned long long>(stats_.rows_upserted),
+                              static_cast<unsigned long long>(rows),
                               static_cast<unsigned long long>(stall_avg),
                               static_cast<unsigned long long>(stats_.stall_max_ms));
+                if (engine_) {
+                    char extra[256];
+                    std::snprintf(extra, sizeof(extra),
+                                  ";e_submitted=%llu;e_accepted=%llu;e_rejected=%llu;"
+                                  "e_dedup=%llu;e_durable=%llu;e_publish=%llu;e_degraded=%llu;"
+                                  "e_retries=%llu;e_finish_pending=%llu;retry_buf=%zu",
+                                  static_cast<unsigned long long>(engine_stats.submitted_records),
+                                  static_cast<unsigned long long>(engine_stats.accepted_records),
+                                  static_cast<unsigned long long>(engine_stats.rejected_records),
+                                  static_cast<unsigned long long>(engine_stats.dedup_dropped),
+                                  static_cast<unsigned long long>(engine_stats.durable_records),
+                                  static_cast<unsigned long long>(
+                                      engine_stats.publish_only_records),
+                                  static_cast<unsigned long long>(engine_stats.degraded_records),
+                                  static_cast<unsigned long long>(engine_stats.retries),
+                                  static_cast<unsigned long long>(
+                                      engine_stats.finish_pending_records),
+                                  retry_ticks_.size());
+                    std::strncat(body, extra, sizeof(body) - std::strlen(body) - 1);
+                }
+                if (!rc_.connected()) rc_.connect(opt_.redis_host, opt_.redis_port);
                 tickshelf::publish_stats(rc_, "tickshelfd", body);
                 next_publish = now2 + 2000;
             }
         }
 
-        std::fprintf(stderr, "tickshelfd: stopping, final flush\n");
-        flush(steady_ms());
+        if (engine_) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(opt_.engine_shutdown_ms);
+            std::fprintf(stderr, "tickshelfd: stopping, engine drain (retry_buf=%zu)\n",
+                         retry_ticks_.size());
+            while (!retry_ticks_.empty() && std::chrono::steady_clock::now() < deadline) {
+                engine_pump(steady_ms());
+                if (!retry_ticks_.empty())
+                    engine_->wait_idle(std::chrono::milliseconds(20));
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            const auto report = engine_->drain(
+                remaining.count() > 0 ? remaining : std::chrono::milliseconds(0));
+            if (!report.complete)
+                std::fprintf(stderr,
+                             "tickshelfd: engine drain incomplete pending=%llu durable=%llu "
+                             "degraded=%llu retry_buf=%zu\n",
+                             static_cast<unsigned long long>(report.pending_records),
+                             static_cast<unsigned long long>(report.durable_records),
+                             static_cast<unsigned long long>(report.degraded_records),
+                             retry_ticks_.size());
+        } else {
+            std::fprintf(stderr, "tickshelfd: stopping, final flush\n");
+            flush(steady_ms());
+        }
         print_stats();
         return 0;
     }
 
 private:
+    // Engine 装配：N 条 Redis 连接 + 写穿时 N 个 SQLite 分片文件。Redis 连接
+    // 由分片 worker 懒连接/重连；存储分片在这里打开失败即启动失败。
+    bool start_engine() {
+        tickshelf::EngineConfig cfg;
+        cfg.shards = static_cast<std::size_t>(std::max(1, opt_.shards));
+        cfg.write_mode = tickshelf::write_mode_from_persist(opt_.persist);
+        cfg.batch_records = opt_.engine_batch_records;
+        cfg.batch_bytes = opt_.engine_batch_bytes;
+        cfg.batch_ms = opt_.engine_batch_ms;
+        cfg.inflight = static_cast<std::size_t>(opt_.engine_inflight);
+        cfg.max_pending_records = opt_.engine_max_pending_records;
+        cfg.dedup_bytes = opt_.engine_dedup ? opt_.engine_dedup_bytes : 0;
+        cfg.lease_ttl_s = opt_.engine_lease_ttl_s;
+        cfg.worker_id = "daemon-" + std::to_string(::getpid());
+        cfg.retry_ms = opt_.engine_retry_ms;
+        cfg.shutdown_ms = opt_.engine_shutdown_ms;
+
+        auto redis_shards =
+            tickshelf::make_redis_shards(opt_.redis_host, opt_.redis_port, cfg.shards);
+        std::vector<std::unique_ptr<tickshelf::StorageShard>> storage_shards;
+        if (cfg.write_mode == tickshelf::WriteMode::WriteThrough) {
+            storage_shards = tickshelf::make_sqlite_storage_shards(opt_.db, cfg.shards);
+            if (storage_shards.size() != cfg.shards) {
+                std::fprintf(stderr, "tickshelfd: cannot open engine db %s (%zu shards)\n",
+                             opt_.db.c_str(), cfg.shards);
+                return false;
+            }
+        }
+        try {
+            engine_ = std::make_unique<tickshelf::Engine>(
+                std::move(cfg), std::move(redis_shards), std::move(storage_shards));
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "tickshelfd: engine start failed: %s\n", e.what());
+            return false;
+        }
+        return true;
+    }
+
+    std::uint64_t engine_tick_interval() const {
+        if (!engine_) return 0;
+        const std::uint64_t batch = opt_.engine_batch_ms == 0 ? 100 : opt_.engine_batch_ms;
+        return std::min<std::uint64_t>(batch, 100);
+    }
+
+    // 源线程的周期泵：年龄封口 + 尝试把背压留下的 retry buffer 重新交给 Engine。
+    void engine_pump(std::uint64_t now) {
+        engine_->tick(now);
+        if (retry_ticks_.empty()) return;
+        const std::size_t accepted = engine_->submit(retry_ticks_, now);
+        if (accepted == 0) return;
+        stats_.ticks_ingested += accepted;
+        retry_ticks_.erase(retry_ticks_.begin(),
+                           retry_ticks_.begin() + static_cast<std::ptrdiff_t>(accepted));
+    }
+
     void accept_conns(std::uint64_t now) {
         for (;;) {
             const int fd = tickshelf::net::tcp_accept(listen_fd_.get());
@@ -185,6 +314,7 @@ private:
 
     void read_session(ConnSession& s, std::uint64_t now, std::vector<tickshelf::Tick>& ticks) {
         if (s.dead) return;
+        if (engine_ && retry_ticks_.size() >= kMaxEngineRetryTicks) return;  // TCP 背压
         std::uint8_t buf[65536];
         std::uint64_t budget = kSessionReadBudgetBytes;
         for (;;) {
@@ -198,9 +328,16 @@ private:
                     s.dead = true;
                     return;
                 }
-                for (const tickshelf::Tick& t : ticks) {
-                    ingestor_.ingest(t);
-                    ++stats_.ticks_ingested;
+                if (engine_) {
+                    const std::size_t accepted = engine_->submit(ticks, now);
+                    stats_.ticks_ingested += accepted;
+                    for (std::size_t i = accepted; i < ticks.size(); ++i)
+                        retry_ticks_.push_back(ticks[i]);
+                } else {
+                    for (const tickshelf::Tick& t : ticks) {
+                        ingestor_.ingest(t);
+                        ++stats_.ticks_ingested;
+                    }
                 }
                 const tickshelf::FrameParser::Stats& st = s.parser.stats();
                 stats_.frames_ok += st.frames_ok - s.reported.frames_ok;
@@ -311,6 +448,33 @@ private:
     }
 
     void print_stats() {
+        if (engine_) {
+            const auto es = engine_->stats();
+            std::fprintf(stderr,
+                         "tickshelfd: engine ingested=%llu submitted=%llu accepted=%llu "
+                         "rejected=%llu dedup=%llu durable=%llu publish=%llu skipped=%llu "
+                         "degraded=%llu pending=%llu retries=%llu finish_pending=%llu "
+                         "queue=%llu/%llu retry_buf=%zu frames=%llu crc_err=%llu resync=%llu "
+                         "conns=%zu\n",
+                         static_cast<unsigned long long>(stats_.ticks_ingested),
+                         static_cast<unsigned long long>(es.submitted_records),
+                         static_cast<unsigned long long>(es.accepted_records),
+                         static_cast<unsigned long long>(es.rejected_records),
+                         static_cast<unsigned long long>(es.dedup_dropped),
+                         static_cast<unsigned long long>(es.durable_records),
+                         static_cast<unsigned long long>(es.publish_only_records),
+                         static_cast<unsigned long long>(es.skipped_records),
+                         static_cast<unsigned long long>(es.degraded_records),
+                         static_cast<unsigned long long>(es.pending_records),
+                         static_cast<unsigned long long>(es.retries),
+                         static_cast<unsigned long long>(es.finish_pending_records),
+                         static_cast<unsigned long long>(es.queue_depth),
+                         static_cast<unsigned long long>(es.queue_peak), retry_ticks_.size(),
+                         static_cast<unsigned long long>(stats_.frames_ok),
+                         static_cast<unsigned long long>(stats_.crc_errors),
+                         static_cast<unsigned long long>(stats_.resync_events), sessions_.size());
+            return;
+        }
         const char* stall = "";
         char stall_buf[64] = {};
         if (stats_.stall_count > 0) {
@@ -339,6 +503,8 @@ private:
     tickshelf::Ingestor ingestor_;
     tickshelf::RespClient rc_;
     std::unique_ptr<tickshelf::TickStore> store_;  // N=1 单文件 / N>1 分片（ADR-020）
+    std::unique_ptr<tickshelf::Engine> engine_;    // --engine on 时替代旧 flush 路径
+    std::vector<tickshelf::Tick> retry_ticks_;     // Engine 背压留下的未接收尾部
     DaemonStats stats_;
 };
 
@@ -357,9 +523,12 @@ int main(int argc, char** argv) {
 
     Daemon d(opt);
     if (!d.start()) return 1;
-    std::fprintf(stderr, "tickshelfd: listening %s:%u, redis %s:%u, flush %llums, persist=%s%s\n",
+    std::fprintf(stderr,
+                 "tickshelfd: listening %s:%u, redis %s:%u, engine=%s, flush %llums, "
+                 "persist=%s%s, shards=%d\n",
                  opt.bind_host.c_str(), opt.port, opt.redis_host.c_str(), opt.redis_port,
+                 opt.engine ? "on" : "off",
                  static_cast<unsigned long long>(opt.flush_interval_ms), opt.persist.c_str(),
-                 opt.persist == "sqlite" ? opt.db.c_str() : "");
+                 opt.persist == "sqlite" ? opt.db.c_str() : "", opt.shards);
     return d.run();
 }

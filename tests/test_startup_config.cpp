@@ -124,8 +124,44 @@ TEST_CASE("startup_config: existing defaults and required evictor soft watermark
         CHECK(options.bytes_per_tick == 0);
         CHECK(options.growth_tolerance_pct == 50.0);
         CHECK_FALSE(options.inflight);
+        if (component == Component::Tickshelfd) {
+            CHECK_FALSE(options.engine);
+            CHECK(options.engine_batch_records == 8192);
+            CHECK(options.engine_batch_bytes == (4ull << 20));
+            CHECK(options.engine_batch_ms == 100);
+            CHECK(options.engine_inflight == 8);
+            CHECK_FALSE(options.engine_dedup);
+            CHECK(options.engine_dedup_bytes == (256ull << 20));
+            CHECK(options.engine_retry_ms == 50);
+            CHECK(options.engine_max_pending_records == 65536);
+            CHECK(options.engine_lease_ttl_s == 60);
+            CHECK(options.engine_shutdown_ms == 10000);
+        }
     }
     rejects(Component::Evictor, {}, "soft_watermark_bytes is required");
+}
+
+TEST_CASE("startup_config: engine options parse and validate dedup budget") {
+    const auto parsed = parse(Component::Tickshelfd,
+                              {"--engine", "--engine-batch-records", "16", "--engine-batch-bytes",
+                               "4096", "--engine-batch-ms", "25", "--engine-inflight", "2",
+                               "--engine-dedup", "--engine-dedup-bytes", "1048576",
+                               "--engine-retry-ms", "5", "--engine-max-pending-records", "64",
+                               "--engine-shutdown-ms", "500"});
+    CHECK(parsed.options.engine);
+    CHECK(parsed.options.engine_batch_records == 16);
+    CHECK(parsed.options.engine_batch_bytes == 4096);
+    CHECK(parsed.options.engine_batch_ms == 25);
+    CHECK(parsed.options.engine_inflight == 2);
+    CHECK(parsed.options.engine_dedup);
+    CHECK(parsed.options.engine_dedup_bytes == 1048576);
+    CHECK(parsed.options.engine_retry_ms == 5);
+    CHECK(parsed.options.engine_max_pending_records == 64);
+    CHECK(parsed.options.engine_shutdown_ms == 500);
+
+    rejects(Component::Tickshelfd,
+            {"--engine", "--engine-dedup", "--engine-dedup-bytes", "0"}, "engine_dedup_bytes");
+    rejects(Component::Tickshelfd, {"--engine-inflight", "0"}, "--engine-inflight");
 }
 
 TEST_CASE("startup_config: shipped complete example parses for all four components") {
@@ -429,7 +465,7 @@ TEST_CASE("startup_config: malformed syntax strings and unsupported escapes fail
 
 TEST_CASE("startup_config: exact JSON contracts use native numbers booleans and escaped strings") {
     CHECK(to_json(Component::Tickshelfd, parse(Component::Tickshelfd, {}).options) ==
-          R"({"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"bind":"127.0.0.1","port":9900,"flush_interval_ms":500,"persist":"none"})");
+          R"({"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"bind":"127.0.0.1","port":9900,"flush_interval_ms":500,"persist":"none","engine":false,"engine_batch_records":8192,"engine_batch_bytes":4194304,"engine_batch_ms":100,"engine_inflight":8,"engine_dedup":false,"engine_dedup_bytes":268435456,"engine_retry_ms":50,"engine_max_pending_records":65536,"engine_lease_ttl_s":60,"engine_shutdown_ms":10000})");
     CHECK(to_json(Component::Persister, parse(Component::Persister, {}).options) ==
           R"({"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"worker":"persister","poll_ms":1000,"once":false})");
     CHECK(to_json(Component::Evictor, parse(Component::Evictor, {"--soft-watermark-bytes", "1"}).options) ==

@@ -37,9 +37,11 @@ add_library(tickshelf_lib STATIC
   src/components/lease/lease_persister.cpp
   src/components/query/reader.cpp
   src/components/redis/resp_client.cpp
+  src/components/redis/redis_shard_pool.cpp
   src/components/storage/shard_route.cpp
   src/components/storage/sharded_store.cpp
   src/components/storage/sqlite_store.cpp
+  src/components/storage/storage_shard_pool.cpp
   src/components/engine/dedupe.cpp
   src/components/engine/engine.cpp)
 target_include_directories(tickshelf_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)

@@ -56,6 +56,27 @@ const Spec kSchema[] = {
     {"tickshelfd", "flush_interval_ms", "--flush-interval-ms", "flush_interval_ms", kDaemon,
      &Options::flush_interval_ms, "MS", 1, kMaxIntervalMs},
     {"tickshelfd", "persist", "--persist", "persist", kDaemon, &Options::persist, "none|sqlite"},
+    {"tickshelfd", "engine", "--engine", "engine", kDaemon, &Options::engine, nullptr},
+    {"tickshelfd", "engine_batch_records", "--engine-batch-records", "engine_batch_records", kDaemon,
+     &Options::engine_batch_records, "N", 1},
+    {"tickshelfd", "engine_batch_bytes", "--engine-batch-bytes", "engine_batch_bytes", kDaemon,
+     &Options::engine_batch_bytes, "BYTES", 0},
+    {"tickshelfd", "engine_batch_ms", "--engine-batch-ms", "engine_batch_ms", kDaemon,
+     &Options::engine_batch_ms, "MS", 0, kMaxIntervalMs},
+    {"tickshelfd", "engine_inflight", "--engine-inflight", "engine_inflight", kDaemon,
+     &Options::engine_inflight, "N", 1, 4096},
+    {"tickshelfd", "engine_dedup", "--engine-dedup", "engine_dedup", kDaemon, &Options::engine_dedup,
+     nullptr},
+    {"tickshelfd", "engine_dedup_bytes", "--engine-dedup-bytes", "engine_dedup_bytes", kDaemon,
+     &Options::engine_dedup_bytes, "BYTES", 0},
+    {"tickshelfd", "engine_retry_ms", "--engine-retry-ms", "engine_retry_ms", kDaemon,
+     &Options::engine_retry_ms, "MS", 1, kMaxIntervalMs},
+    {"tickshelfd", "engine_max_pending_records", "--engine-max-pending-records",
+     "engine_max_pending_records", kDaemon, &Options::engine_max_pending_records, "N", 1},
+    {"tickshelfd", "engine_lease_ttl_s", "--engine-lease-ttl-s", "engine_lease_ttl_s", kDaemon,
+     &Options::engine_lease_ttl_s, "S", 1, 86400},
+    {"tickshelfd", "engine_shutdown_ms", "--engine-shutdown-ms", "engine_shutdown_ms", kDaemon,
+     &Options::engine_shutdown_ms, "MS", 1, kMaxIntervalMs},
     {"persister", "worker", "--worker", "worker", kPersister, &Options::worker, "ID"},
     {"persister", "poll_ms", "--poll-ms", "poll_ms", kPersister, &Options::poll_ms, "MS", 1,
      kMaxIntervalMs},
@@ -293,6 +314,12 @@ void validate_evictor(const Options& options) {
         fail("evictor", "emergency_watermark_bytes must be 0 (disabled) or greater than soft_watermark_bytes");
 }
 
+void validate_tickshelfd(const Options& options) {
+    if (!options.engine) return;
+    if (options.engine_dedup && options.engine_dedup_bytes == 0)
+        fail("tickshelfd", "engine_dedup_bytes must be > 0 when engine_dedup is enabled");
+}
+
 std::string json_string(std::string_view text) {
     std::string out = "\"";
     constexpr char hex[] = "0123456789abcdef";
@@ -356,6 +383,7 @@ ParsedConfig parse(Component component, const std::vector<std::string>& args) {
         assign(options, *override.spec, override.value, std::string(override.spec->flag));
     if (component == Component::Evictor || has_evictor)
         validate_evictor(for_component(configs, Component::Evictor));
+    if (component == Component::Tickshelfd) validate_tickshelfd(options);
     return {options, print ? Action::PrintConfig : (check ? Action::CheckConfig : Action::Run)};
 }
 

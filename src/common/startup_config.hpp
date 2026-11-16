@@ -18,6 +18,18 @@ struct Options {
     std::uint16_t port = 9900;  // queryd 的默认端口由 parse 改为 9910
     std::uint64_t flush_interval_ms = 500;
     std::string persist = "none";
+    // 分片持久化引擎（ADR-023）；默认 off，旧 flush 路径逐字节不变。
+    bool engine = false;
+    std::uint64_t engine_batch_records = 8192;
+    std::uint64_t engine_batch_bytes = 4ull << 20;
+    std::uint64_t engine_batch_ms = 100;
+    std::uint64_t engine_inflight = 8;
+    bool engine_dedup = false;
+    std::uint64_t engine_dedup_bytes = 256ull << 20;
+    std::uint64_t engine_retry_ms = 50;
+    std::uint64_t engine_max_pending_records = 65536;
+    std::uint64_t engine_lease_ttl_s = 60;
+    std::uint64_t engine_shutdown_ms = 10000;
     std::string worker = "persister";  // 运行时仍由 persister 追加 -PID
     std::uint64_t poll_ms = 1000;
     bool once = false;

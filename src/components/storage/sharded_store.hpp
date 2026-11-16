@@ -68,9 +68,6 @@ private:
         bool stop = false;
     };
 
-    // 路由哈希：规范化输入 = 去 NUL 后的实际 symbol 字节（写侧 strnlen(8)、读侧
-    // string::size()——两侧同一规范形式，否则读写落到不同分片）
-    std::size_t shard_of(const char* symbol, std::size_t len) const;
     void worker_loop(Shard& s);
 
     int shard_count_ = 1;  // 配置值（open 前设置）

@@ -7,21 +7,9 @@
 #include <thread>
 
 #include "components/ingest/ingestor.hpp"  // tick_symbol
+#include "shard_route.hpp"
 
 namespace tickshelf {
-namespace {
-
-// FNV-1a（规范化输入 = 去 NUL 后的实际 symbol 字节，见头注释）
-std::uint64_t fnv1a(const char* bytes, std::size_t n) {
-    std::uint64_t h = 1469598103934665603ull;
-    for (std::size_t i = 0; i < n; ++i) {
-        h ^= static_cast<unsigned char>(bytes[i]);
-        h *= 1099511628211ull;
-    }
-    return h;
-}
-
-}  // namespace
 
 ShardedTickStore::~ShardedTickStore() {
     for (auto& s : shards_) {
@@ -34,11 +22,6 @@ ShardedTickStore::~ShardedTickStore() {
     }
     for (auto& s : shards_)
         if (s->worker.joinable()) s->worker.join();
-}
-
-std::size_t ShardedTickStore::shard_of(const char* symbol, std::size_t len) const {
-    return static_cast<std::size_t>(fnv1a(symbol, len) %
-                                    static_cast<std::uint64_t>(shards_.size()));
 }
 
 void ShardedTickStore::worker_loop(Shard& s) {
@@ -60,7 +43,8 @@ bool ShardedTickStore::open(const std::string& path) {
     if (shard_count_ < 1) shard_count_ = 1;
     for (int i = 0; i < shard_count_; ++i) {
         auto s = std::make_unique<Shard>();
-        const std::string p = shard_count_ == 1 ? path : path + "." + std::to_string(i);
+        const std::string p = shard_path(path, static_cast<std::size_t>(i),
+                                         static_cast<std::size_t>(shard_count_));
         if (!s->store.open(p)) return false;
         shards_.push_back(std::move(s));
     }
@@ -79,7 +63,7 @@ std::int64_t ShardedTickStore::upsert_flush(
     auto payload = std::make_shared<std::vector<std::vector<Tick>>>(shards_.size());
     for (const auto* b : batches)
         for (const Tick& t : *b)
-            (*payload)[shard_of(t.symbol, strnlen(t.symbol, sizeof(t.symbol)))].push_back(t);
+            (*payload)[shard_of(t, shards_.size())].push_back(t);
 
     // 提交 + 等全部聚合（外部语义保持同步；内部并行度 = 非空分片数）
     std::vector<std::future<std::int64_t>> futs;
@@ -117,7 +101,7 @@ std::vector<Tick> ShardedTickStore::query_range(const std::string& symbol, std::
                                                 std::uint64_t to_ms) {
     query_failed_ = false;
     // 路由是纯函数：一个 symbol 只可能在一个分片——单分片查询，无需扇出归并
-    const std::size_t i = shard_of(symbol.data(), symbol.size());
+    const std::size_t i = shard_of(symbol, shards_.size());
     auto out = shards_[i]->store.query_range(symbol, from_ms, to_ms);
     if (shards_[i]->store.query_failed()) query_failed_ = true;
     return out;

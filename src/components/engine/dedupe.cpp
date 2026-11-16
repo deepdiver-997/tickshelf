@@ -19,8 +19,8 @@ std::size_t next_power_of_two(std::size_t value) {
 }  // namespace
 
 DedupeCache::DedupeCache(std::size_t max_bytes) {
-    if (max_bytes < sizeof(Entry)) return;
-    std::size_t capacity = max_bytes / sizeof(Entry);
+    if (max_bytes < entry_size()) return;
+    std::size_t capacity = max_bytes / entry_size();
     capacity = std::min<std::size_t>(capacity, 1u << 30);  // table 用 int32 下标
     if (capacity == 0) return;
     capacity_ = capacity;
@@ -29,7 +29,10 @@ DedupeCache::DedupeCache(std::size_t max_bytes) {
     mask_ = table_.size() - 1;
 }
 
-std::size_t DedupeCache::entry_size() { return sizeof(Entry); }
+std::size_t DedupeCache::entry_size() {
+    // ring 的 Entry（72B）+ 开放寻址表每条约 2×int32（8B）。
+    return sizeof(Entry) + 2 * sizeof(std::int32_t);
+}
 
 std::uint64_t DedupeCache::hash_tick(const Tick& tick) {
     const auto* bytes = reinterpret_cast<const unsigned char*>(&tick);

@@ -146,10 +146,28 @@ unchanged: one shard uses `db`, multiple shards use `db.0`, `db.1`, etc.
 | `port` | `--port P` | `9900` | Integer 1–65535 |
 | `flush_interval_ms` | `--flush-interval-ms MS` | `500` | Positive millisecond interval |
 | `persist` | `--persist none\|sqlite` | `none` | `none`: classic persister read-back; `sqlite`: write-through |
+| `engine` | `--engine` / `--no-engine` | `false` | Sharded async persistence engine (ADR-023); off keeps the original flush path byte-for-byte |
+| `engine_batch_records` | `--engine-batch-records N` | `8192` | Soft slice limit per shard (≥1); a `(symbol,date)` group may overshoot |
+| `engine_batch_bytes` | `--engine-batch-bytes N` | `4194304` | Byte trigger; `0` disables it |
+| `engine_batch_ms` | `--engine-batch-ms MS` | `100` | Age trigger; `0` means capacity-only sealing |
+| `engine_inflight` | `--engine-inflight N` | `8` | Ready-queue capacity per shard (1–4096) |
+| `engine_dedup` | `--engine-dedup` / `--no-engine-dedup` | `false` | Optional per-shard FIFO dedupe (full 64B compare) |
+| `engine_dedup_bytes` | `--engine-dedup-bytes N` | `268435456` | Per-shard dedupe budget; must be >0 when `engine_dedup=true` |
+| `engine_retry_ms` | `--engine-retry-ms MS` | `50` | Base publish retry delay (exponential up to `engine_shutdown_ms` budget) |
+| `engine_max_pending_records` | `--engine-max-pending-records N` | `65536` | Per-shard staging+queued+in-flight cap (≥1) |
+| `engine_lease_ttl_s` | `--engine-lease-ttl-s S` | `60` | Write-through lease TTL (1–86400) |
+| `engine_shutdown_ms` | `--engine-shutdown-ms MS` | `10000` | Drain deadline on SIGTERM |
 
 The example explicitly selects `sqlite`; omitting both file and CLI settings
 still selects the original `none` mode. Storage settings are validated and
 included in effective JSON even when `persist=none`.
+
+When `engine=true`, `persist=sqlite` selects write-through (publish + claim +
+storage + exact `done` set) and `persist=none` selects publish-only. The engine
+opens N Redis connections and, for write-through, N SQLite shard files using the
+same `db`/`db.i` layout and symbol routing as `ShardedTickStore`, so persister and
+queryd remain compatible. It is off by default; the original synchronous flush
+path is unchanged unless explicitly enabled.
 
 ### `[persister]`
 
@@ -232,7 +250,7 @@ Exact key sets, shown with no-file defaults (evictor supplied with
 **tickshelfd**
 
 ```json
-{"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"bind":"127.0.0.1","port":9900,"flush_interval_ms":500,"persist":"none"}
+{"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"bind":"127.0.0.1","port":9900,"flush_interval_ms":500,"persist":"none","engine":false,"engine_batch_records":8192,"engine_batch_bytes":4194304,"engine_batch_ms":100,"engine_inflight":8,"engine_dedup":false,"engine_dedup_bytes":268435456,"engine_retry_ms":50,"engine_max_pending_records":65536,"engine_lease_ttl_s":60,"engine_shutdown_ms":10000}
 ```
 
 **persister**

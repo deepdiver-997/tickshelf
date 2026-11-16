@@ -24,7 +24,7 @@ public:
     bool enabled() const { return capacity_ != 0; }
     // true = 已在窗口内（重复，未插入）；false = 新记录，已插入。
     bool check_and_insert(const Tick& tick);
-    // 单条 Entry 的字节数（预算换算；测试用来构造精确容量）。
+    // 单条 Entry 的预算字节（ring 条目 + 开放寻址表按 2×capacity 的 int32 摊薄）。
     static std::size_t entry_size();
 
     std::size_t entries() const { return size_; }

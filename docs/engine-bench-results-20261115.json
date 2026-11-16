@@ -1,0 +1,276 @@
+{
+  "schema": "tickshelf.engine-bench.20261115.v1",
+  "input": "synthetic TTAP flood (floodgen, 4 senders, 64 symbols each); private Redis; no shared Redis",
+  "production_qualified": false,
+  "machine": {
+    "os": "macOS 15.8.1",
+    "arch": "arm64",
+    "cpu": "Apple M2 Pro",
+    "cores": 12,
+    "memory_bytes": 17179869184
+  },
+  "build": {
+    "type": "Release",
+    "binary": "build-engine-release/tickshelfd",
+    "binary_sha256": "60c81b56a0b8c1ac9c50ac8fbdd59be62382a7c8e2779a98bfdca03c7ea842c4"
+  },
+  "git_head_at_measurement": "7d690a2",
+  "method": {
+    "completion": "poll actual SQLite row count until rows >= floodgen SENT and distinct == rows",
+    "not_used": "2s stats publish cadence for completion (it aliases a 2s run into 4s)",
+    "numerator": "durable SQLite rows across shard files",
+    "denominator": "wall time from flood start to row-count completion",
+    "config": {
+      "shards": 4,
+      "persist": "sqlite",
+      "old_flush_interval_ms": 100,
+      "engine_batch_records": 4096,
+      "engine_batch_ms": 100,
+      "engine_inflight": 8,
+      "engine_max_pending_records": 65536,
+      "senders": 4
+    }
+  },
+  "correctness": {
+    "all_cases_completed": true,
+    "all_rows_equal_distinct_and_sent": true
+  },
+  "summary": [
+    {
+      "offered_records_per_s": 80000,
+      "mode": "engine",
+      "runs": 2,
+      "wall_s_median": 5.034,
+      "durable_equivalent_per_s_median": 81362.1,
+      "sqlite_rows": [
+        409600,
+        409600
+      ],
+      "completed_all": true
+    },
+    {
+      "offered_records_per_s": 80000,
+      "mode": "old-flush",
+      "runs": 2,
+      "wall_s_median": 5.236,
+      "durable_equivalent_per_s_median": 78237.3,
+      "sqlite_rows": [
+        409600,
+        409600
+      ],
+      "completed_all": true
+    },
+    {
+      "offered_records_per_s": 400000,
+      "mode": "engine",
+      "runs": 2,
+      "wall_s_median": 5.342,
+      "durable_equivalent_per_s_median": 377252.7,
+      "sqlite_rows": [
+        2015232,
+        2015232
+      ],
+      "completed_all": true
+    },
+    {
+      "offered_records_per_s": 400000,
+      "mode": "old-flush",
+      "runs": 2,
+      "wall_s_median": 5.33,
+      "durable_equivalent_per_s_median": 378057.0,
+      "sqlite_rows": [
+        2015232,
+        2015232
+      ],
+      "completed_all": true
+    },
+    {
+      "offered_records_per_s": 1000000,
+      "mode": "engine",
+      "runs": 2,
+      "wall_s_median": 2.324,
+      "durable_equivalent_per_s_median": 867112.7,
+      "sqlite_rows": [
+        2015232,
+        2015232
+      ],
+      "completed_all": true
+    },
+    {
+      "offered_records_per_s": 1000000,
+      "mode": "old-flush",
+      "runs": 2,
+      "wall_s_median": 2.317,
+      "durable_equivalent_per_s_median": 869984.0,
+      "sqlite_rows": [
+        2015232,
+        2015232
+      ],
+      "completed_all": true
+    }
+  ],
+  "conclusion": "No attributable steady-state throughput gain. Both paths complete every case with rows == distinct == sent. Engine is ~+4% at 80k offered (absence of the 100ms flush-boundary tail), -0.2%/-0.3% at 400k/1M (queue/refcount overhead, within noise). The old synchronous flush already exceeds 30k by >25x on this synthetic TTAP workload; a company 3-5k/s symptom must be diagnosed in its schema/synchronous mode/record processing, not assumed to be flush serialization. Engine value is decoupling, backpressure and observability.",
+  "commands": [
+    "python3 scripts/engine_bench.py --build build-engine-release --duration 5 --rate 20000 --senders 4 --shards 4 --repeat 2",
+    "python3 scripts/engine_bench.py --build build-engine-release --duration 5 --rate 100000 --senders 4 --shards 4 --repeat 2",
+    "python3 scripts/engine_bench.py --build build-engine-release --duration 2 --rate 250000 --senders 4 --shards 4 --repeat 2"
+  ],
+  "cases": [
+    {
+      "mode": "old-flush",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 80000,
+      "duration_s": 5.0,
+      "floodgen_sent": 409600,
+      "sqlite_rows": 409600,
+      "sqlite_distinct_keys": 409600,
+      "wall_s": 5.29,
+      "durable_equivalent_per_s": 77434.8,
+      "repeat": 1
+    },
+    {
+      "mode": "engine",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 80000,
+      "duration_s": 5.0,
+      "floodgen_sent": 409600,
+      "sqlite_rows": 409600,
+      "sqlite_distinct_keys": 409600,
+      "wall_s": 5.034,
+      "durable_equivalent_per_s": 81372.3,
+      "repeat": 1
+    },
+    {
+      "mode": "old-flush",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 80000,
+      "duration_s": 5.0,
+      "floodgen_sent": 409600,
+      "sqlite_rows": 409600,
+      "sqlite_distinct_keys": 409600,
+      "wall_s": 5.182,
+      "durable_equivalent_per_s": 79039.8,
+      "repeat": 2
+    },
+    {
+      "mode": "engine",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 80000,
+      "duration_s": 5.0,
+      "floodgen_sent": 409600,
+      "sqlite_rows": 409600,
+      "sqlite_distinct_keys": 409600,
+      "wall_s": 5.035,
+      "durable_equivalent_per_s": 81351.9,
+      "repeat": 2
+    },
+    {
+      "mode": "old-flush",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 400000,
+      "duration_s": 5.0,
+      "floodgen_sent": 2015232,
+      "sqlite_rows": 2015232,
+      "sqlite_distinct_keys": 2015232,
+      "wall_s": 5.34,
+      "durable_equivalent_per_s": 377354.1,
+      "repeat": 1
+    },
+    {
+      "mode": "engine",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 400000,
+      "duration_s": 5.0,
+      "floodgen_sent": 2015232,
+      "sqlite_rows": 2015232,
+      "sqlite_distinct_keys": 2015232,
+      "wall_s": 5.337,
+      "durable_equivalent_per_s": 377581.5,
+      "repeat": 1
+    },
+    {
+      "mode": "old-flush",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 400000,
+      "duration_s": 5.0,
+      "floodgen_sent": 2015232,
+      "sqlite_rows": 2015232,
+      "sqlite_distinct_keys": 2015232,
+      "wall_s": 5.321,
+      "durable_equivalent_per_s": 378759.9,
+      "repeat": 2
+    },
+    {
+      "mode": "engine",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 400000,
+      "duration_s": 5.0,
+      "floodgen_sent": 2015232,
+      "sqlite_rows": 2015232,
+      "sqlite_distinct_keys": 2015232,
+      "wall_s": 5.347,
+      "durable_equivalent_per_s": 376923.8,
+      "repeat": 2
+    },
+    {
+      "mode": "old-flush",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 1000000,
+      "duration_s": 2.0,
+      "floodgen_sent": 2015232,
+      "sqlite_rows": 2015232,
+      "sqlite_distinct_keys": 2015232,
+      "wall_s": 2.314,
+      "durable_equivalent_per_s": 870995.3,
+      "repeat": 1
+    },
+    {
+      "mode": "engine",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 1000000,
+      "duration_s": 2.0,
+      "floodgen_sent": 2015232,
+      "sqlite_rows": 2015232,
+      "sqlite_distinct_keys": 2015232,
+      "wall_s": 2.329,
+      "durable_equivalent_per_s": 865273.5,
+      "repeat": 1
+    },
+    {
+      "mode": "old-flush",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 1000000,
+      "duration_s": 2.0,
+      "floodgen_sent": 2015232,
+      "sqlite_rows": 2015232,
+      "sqlite_distinct_keys": 2015232,
+      "wall_s": 2.319,
+      "durable_equivalent_per_s": 868972.7,
+      "repeat": 2
+    },
+    {
+      "mode": "engine",
+      "status": "ok",
+      "completed": true,
+      "offered_records_per_s": 1000000,
+      "duration_s": 2.0,
+      "floodgen_sent": 2015232,
+      "sqlite_rows": 2015232,
+      "sqlite_distinct_keys": 2015232,
+      "wall_s": 2.319,
+      "durable_equivalent_per_s": 868951.8,
+      "repeat": 2
+    }
+  ]
+}

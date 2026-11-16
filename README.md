@@ -61,6 +61,15 @@ python3 scripts/run_stack.py --build build --config examples/tickshelf.ini
 配置语法、路径与覆盖规则见 [docs/configuration.md](docs/configuration.md)。
 可选外部 JSON mock 的私有 Redis 全链演练/压测见 [docs/real-source-sim.md](docs/real-source-sim.md)。
 
+**分片异步持久化引擎（可选，默认关闭；ADR-023）**：
+
+```bash
+./build/tickshelfd --config examples/tickshelf-engine.ini   # engine=true, persist=sqlite, 4 shards
+# CLI 覆盖示例：--engine --persist sqlite --shards 4 --engine-batch-records 8192
+```
+
+`--engine off`（默认）保持原同步 flush。写穿/仅发布由 `--persist sqlite|none` 决定；引擎为每分片开一条 Redis 连接和一个 SQLite 分片文件，文件布局/路由与 `ShardedTickStore` 一致，persister/queryd 继续兼容。私有端到端：`python3 scripts/test_engine_runtime.py --build build`；旧/新对比：`python3 scripts/engine_bench.py --build build-release --duration 2 --rate 250000 --senders 4`。实测边界见 [ADR-023](docs/design.md) 与 [引擎实测](docs/engine-refactor-20261115.md)。
+
 **五档 JSON / 变长 Record 性能实验台（可选，非生产 TTAP 接口）**：
 
 **默认输入全部是合成行情，不是真实生产捕获。** `backend=rocksdb` 已将完整记录接入 JSON/TCP/hash/真实 Redis 链路；原文捕获回放、独立对账、来源分级及数据库/syscall 口径见 [全记录基准说明](docs/full-record-benchmark.md)。正确性或合成容量 PASS 不代表生产基准合格。

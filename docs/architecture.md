@@ -148,12 +148,39 @@ evictor 循环：采样 used_memory → 超软水位才动 → HSCAN state 枚�
 实测（read_bench.sh）：10s 窗口查询 53→13.5ms（−75%）、30s 窗口 119→23ms（−81%）、
 内存 198→113B/tick（−43%）。窗口越大收益越大：查询成本从 O(ticks) 变为 O(命中段数)。
 
+## 可选：分片异步持久化引擎（ADR-023）
+
+默认关闭；`--engine on` 时 `tickshelfd` 不再在 poll 线程里同步 flush：
+
+```
+read_session → Engine::submit
+  → 按 symbol 路由到每分片 Ingestor staging（仅源线程）
+  → 条数/字节/年龄封口成不可变 Slice（内部仍是 vector<Batch>，批 id 协议不变）
+  → 每分片有界队列 + 单 worker
+      publish-only: flush_batches → 完成
+      write-through: flush_batches(claim) → 过滤 claimed
+                     → SqliteTickStore::upsert_flush → finish 精确 id 集合
+```
+
+- 每分片一条 Redis 连接 + 一个 SQLite 文件；文件布局/路由与 `ShardedTickStore`
+  完全一致，persister/queryd 继续读写同一批分片。
+- 失败：发布失败退避重试；存储失败释放自己的租约并降级给 persister；finish
+  失败计 `finish_pending`（数据已耐久）；drain 超时如实报告未完成。
+- 背压：每分片 pending 上限；`submit` 只接前缀，尾部进有界 retry buffer；
+  buffer 满则停止 poll 会话（TCP 反压）。每 ≤100ms 的 `engine_pump` 做年龄封口
+  与重投。
+- 实测边界：合成 TTAP flood 下旧同步 flush 与 engine 都能完整落库且稳态吞吐
+  接近（见 ADR-023）；本引擎是解耦/可配置性，不是自动的性能倍数。
+
 ## 观测面（ADR-013）
 
 各组件每 2s 发布自过期负载键（`stats:{组件}`，EX 10，观测失败静默）：
 
 ```
-stats:tickshelfd  persist=sqlite;ingested=...;pending=...;stall_avg=...;stall_max=...
+stats:tickshelfd  persist=sqlite;engine=on;ingested=...;pending=...;...
+                  e_submitted=...;e_accepted=...;e_rejected=...;e_dedup=...
+                  e_durable=...;e_publish=...;e_degraded=...;e_retries=...
+                  e_finish_pending=...;e_pending=...;e_queue=...;retry_buf=...
 stats:persister   worker=...;backlog=...;claimed=...;skipped=...;rows=...;total=...
 ```
 
@@ -181,4 +208,4 @@ stats:persister   worker=...;backlog=...;claimed=...;skipped=...;rows=...;total=
 - 容量不等式校验（M2，ADR-007）
 - 租约分块续期（批大到跨 60s TTL 时）
 - 混沌源与对账补拉（M3，ADR-006）
-- 异步持久化接口与 daemon 写穿——评估结论见 ADR-012
+- 异步持久化接口与 daemon 写穿——已由 ADR-023 的 opt-in 分片引擎实现；默认关闭，旧同步路径保留

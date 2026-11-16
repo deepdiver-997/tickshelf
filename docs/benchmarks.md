@@ -14,6 +14,10 @@
 
 见 [独立优化报告](pipeline-optimization-20261114.md) 与 [机器证据](pipeline-optimization-20261114.json)：四布局各百万条三轮全内容核对；5,400 证券、363 万条、34.603秒实际完成观察，文件＋SQLite FULL 稀疏索引（fullfsync=1）端到端104,904条/s通过100k硬floor。达标依赖32,768条/250ms吞吐优先批量，不代表全记录SQLite也达标、低延迟通过或目标硬件已被测。原生RocksDB同步库参考与网络全链路成绩分开列示，旧结果不覆盖。
 
+## 2026-11-15 分片异步持久化引擎（默认关闭）
+
+旧同步 flush vs `--engine on`（写穿、4 分片、私有 Redis、`floodgen`）在 80k/400k/1M offered 下**没有可归因的稳态吞吐提升**：80k 时 Engine +4.0%（旧路径 100ms flush 边界尾部），400k/1M 时 −0.2%/−0.3%（队列/引用计数开销，属于噪声）；全部 case 都完整落库且 `rows == distinct == SENT`。1M offered 的 2s 突发两条路径都完成 2,015,232 行，旧同步 flush 没有追不上。结论是解耦/背压/可观测性，不是性能倍数；详见 [引擎重构实测](engine-refactor-20261115.md) 与 [机器证据](engine-bench-results-20261115.json)。
+
 ## 方法论（口径纪律）
 
 1. **同负载 A/B**：只改一个变量（存储布局/持久化模式），其余钉死——`read_bench.sh`、`bench_compare.sh` 是这个纪律的产物。

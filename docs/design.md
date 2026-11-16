@@ -210,6 +210,16 @@
 - **验收**：完整原始五档 JSON、真实解析、SHA-256 查重、Redis roundtrip、FULL、零重复基线与声明证券基数缺一不可。硬 floor 使用包含最终 ACK 的端到端唯一完成率，实际发送至少10秒，并同时检查供给、积压与尾部；不能把 95% offered 或短跑当作100k通过。最大批量不是实际批量，按各阶段真实剩余队首记录记龄，独立记录 rows/bytes/age/tail 触发与实际事务大小。
 - **代价与边界**：摘要缓存为有预算的 FIFO 窗口；单份 payload 和固定开销记账不等于 RSS 上限。稀疏索引节省写入，但增加候选段读取/过滤及启动恢复工作。全记录 SQL 布局和追加文件不是相同物理去重合同；宏观 fsync 名称也不代表相同硬件承诺。先以可关闭布局/批量对照取证；没有证据需要时不增加后台 checkpoint 或异步派生索引，更不降低 FULL 来换成绩。
 
+## ADR-023 分片异步持久化引擎：把 flush 从收包线程解耦（2026-11-15）
+
+- **背景**：旧路径在单线程 poll 循环里同步完成 Redis pipeline 与 `store_->upsert_flush()`；写穿时 `ShardedTickStore` 内部虽有多写线程，调用方仍等全部 future。ADR-012 把异步/多线程 deferred，ADR-020 附录把“异步化 + 流式交接”列为会改变瓶颈的前置条件。现在该条件被显式跨过，但以 opt-in 方式保留旧路径。
+- **决定**：`tickshelfd --engine on` 使用 `components/engine/`。源线程按 `symbol` 路由到每分片一个 `Ingestor` staging；达到条数/字节/年龄后 `drain()` 封成不可变 `Slice`（内部仍是 `std::vector<Batch>`，批 id/段/索引/state/lease 协议不变，重试不重新分组）。每分片一个有界队列 + 单 worker；write-through 复用 `flush_batches`/`finish_written_batch_ids`/`release_claim_ids`，publish-only 只发布。Redis 每分片一条连接，SQLite 每分片一个 `SqliteTickStore`，文件与路由和 `ShardedTickStore` 完全一致（`shard_route.*` 共享，含历史非标准 FNV 常量）。
+- **写穿策略**：v1 静态，`--persist sqlite` = 写穿，`none` = 仅发布；不做负载控制器（ADR-013 的信号映射仍成立）。去重可选、默认关闭：每分片 FNV-1a(64B) + 完整 64B 比较，FIFO 预算可配；Tick 定长，不需要 SHA/OpenSSL。唯一键仍是最终收敛点。
+- **失败语义**：发布失败在同一 Slice 上退避重试；pipeline 部分生效后 `SETNX` 对自己租约返回 Null 时，补 `GET lease:{id}` 与 worker_id 比对，避免误判他人持有而漏写存储。存储失败只 `release` 自己的精确 id 集合，Slice 标 degraded，交 persister 补偿；finish 失败重试后计 `finish_pending`，数据已耐久不谎报丢失。`drain` 在整个 deadline 内允许重试，超时后停止并报告未完成条数；未完成不伪装成零。
+- **背压**：每分片 `pending_records` 上限；`submit` 只接收前缀，被拒尾部进 daemon 的有界 retry buffer；buffer 满则不再 poll 会话（数据留内核，TCP 反压 driver），避免“可读但故意不读”的忙循环。队列满时症状是源端阻塞/拒绝，不是锁竞争——与 ADR-020 附录的预判一致。
+- **代价与实测边界**：真实队列深度出现，`mutex+cv` 的 `notify_one`/谓词循环与 timed wait 需要被 TSan 覆盖；每分片慢存储会反压整个源（有意的背压）。在 Mac 合成 TTAP flood（4 分片、write-through、`floodgen` 4 进程）上，80k/400k/1M offered 两组路径都完整落库，稳态约 7.8万/37.8万/87.0万 行/s（按实际行数完成判定），**Engine 没有可归因的稳态吞吐提升**；旧同步 flush 在该负载下已远超 30k。结论：这次交付的是解耦、可配置与可观测性，不是免费的性能倍数；若目标服务器仍只有 3–5k/s，瓶颈在生产 schema/同步模式/单条 Record 处理，不能靠本引擎自动消除。
+- **验证**：engine 单测覆盖发布/部分认领/存储降级/finish 失败/重试/背压/年龄封口/去重/两分片/drain 超时；私有 Redis 端到端覆盖写穿精确行数与 kill -9 后 persister 补偿；TSan 11 用例 + 端到端通过；ASan/UBSan 全离线 98/34964 通过（并修复了两处既有测试自身的越界：`test_frame_parser` 20B 后写 4B 锚点、`test_resp` 15B 字面量按 17B 构造）。旧路径默认不变，persister/queryd/evictor 不改。
+
 ## 数据模型（Redis）
 
 - ~~行情键 `ts:{symbol}:{yyyymmdd}`（v1 逐 tick ZSET，member=64B Tick 原始字节）~~ — ADR-017 起退役（dev 期 flag-day 换段式；生产期格式迁移走 ADR-018 双读配方）

@@ -59,7 +59,7 @@ TEST_CASE("RESP: 解析器各类回复") {
 TEST_CASE("RESP: bulk 含二进制（\\r\\n 与 \\0 都不破坏边界）") {
     RespParser p;
     // 内容 = "a\r\n\0b"（5 字节），尾部再跟下一条命令的回复
-    auto out = parse_all(p, std::string("$5\r\na\r\n\0b\r\n:7\r\n", 17));
+    auto out = parse_all(p, std::string("$5\r\na\r\n\0b\r\n:7\r\n", 15));
     REQUIRE(out.size() == 2);
     CHECK(out[0].type == RespValue::Type::Bulk);
     REQUIRE(out[0].str.size() == 5);

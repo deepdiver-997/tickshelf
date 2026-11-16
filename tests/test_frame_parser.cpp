@@ -303,7 +303,7 @@ TEST_CASE("解析器: 控制型帧（type=2 查询请求，v1.1 互证分型）"
     bh.type = kFrameTypeQuery;
     bh.count = 0;
     bh.payload_bytes = kMaxFramePayloadBytes + 1;
-    std::vector<std::uint8_t> bad(kHeaderBytes);
+    std::vector<std::uint8_t> bad(kHeaderBytes + 4);  // 20B 头 + 28..31 的假锚点
     encode_frame_header(bh, bad.data());
     std::memcpy(bad.data() + kHeaderBytes, kMagic, 4);  // 后随假锚点诱导扩容路径
 

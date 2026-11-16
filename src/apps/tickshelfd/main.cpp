@@ -192,7 +192,8 @@ public:
                     std::snprintf(extra, sizeof(extra),
                                   ";e_submitted=%llu;e_accepted=%llu;e_rejected=%llu;"
                                   "e_dedup=%llu;e_durable=%llu;e_publish=%llu;e_degraded=%llu;"
-                                  "e_retries=%llu;e_finish_pending=%llu;retry_buf=%zu",
+                                  "e_retries=%llu;e_finish_pending=%llu;e_pending=%llu;"
+                                  "e_queue=%llu;retry_buf=%zu",
                                   static_cast<unsigned long long>(engine_stats.submitted_records),
                                   static_cast<unsigned long long>(engine_stats.accepted_records),
                                   static_cast<unsigned long long>(engine_stats.rejected_records),
@@ -204,6 +205,8 @@ public:
                                   static_cast<unsigned long long>(engine_stats.retries),
                                   static_cast<unsigned long long>(
                                       engine_stats.finish_pending_records),
+                                  static_cast<unsigned long long>(engine_stats.pending_records),
+                                  static_cast<unsigned long long>(engine_stats.queue_depth),
                                   retry_ticks_.size());
                     std::strncat(body, extra, sizeof(body) - std::strlen(body) - 1);
                 }

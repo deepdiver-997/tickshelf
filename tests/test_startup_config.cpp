@@ -480,6 +480,21 @@ TEST_CASE("startup_config: exact JSON contracts use native numbers booleans and 
     CHECK(options.worker == "a\"\\\n\t\r\b\f中文");  // JSON 不追加运行时 -PID
 }
 
+TEST_CASE("startup_config: shipped engine example enables engine and parses for all services") {
+    const auto file = fs::path(TICKSHELF_SOURCE_DIR) / "examples/tickshelf-engine.ini";
+    REQUIRE(fs::is_regular_file(file));
+    for (auto component : kComponents) {
+        const auto parsed = parse(component, {"--config", file.string(), "--print-config"});
+        CHECK(parsed.action == Action::PrintConfig);
+    }
+    const auto engine = parse(Component::Tickshelfd, {"--config", file.string(), "--print-config"});
+    CHECK(engine.options.engine);
+    CHECK(engine.options.persist == "sqlite");
+    CHECK(engine.options.shards == 4);
+    CHECK(engine.options.engine_batch_records == 8192);
+    CHECK(engine.options.engine_lease_ttl_s == 60);
+}
+
 TEST_CASE("startup_config: check print and help actions share validation and advertise usage") {
     TmpConfig tmp(kComplete);
     for (auto component : kComponents) {

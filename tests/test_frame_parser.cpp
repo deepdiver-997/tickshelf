@@ -5,7 +5,7 @@
 #include <random>
 #include <vector>
 
-#include "libtickshelf/frame_parser.hpp"
+#include "components/ingest/frame_parser.hpp"
 
 using namespace tickshelf;
 

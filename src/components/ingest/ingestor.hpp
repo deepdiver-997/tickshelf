@@ -18,7 +18,7 @@
 #include <vector>
 
 #include "common/tick.hpp"
-#include "resp_client.hpp"
+#include "components/redis/resp_client.hpp"
 
 namespace tickshelf {
 

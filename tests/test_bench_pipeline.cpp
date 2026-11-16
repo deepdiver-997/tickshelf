@@ -2,7 +2,7 @@
 #include "config.hpp"
 #include "hash.hpp"
 #include "protocol.hpp"
-#include "libtickshelf/sqlite_store.hpp"
+#include "components/storage/sqlite_store.hpp"
 #include <algorithm>
 #include <array>
 #include <deque>

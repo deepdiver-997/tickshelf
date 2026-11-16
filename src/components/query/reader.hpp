@@ -12,9 +12,9 @@
 #include <utility>
 #include <vector>
 
-#include "ingestor.hpp"  // 键空间：idx/backfill 约定
-#include "resp_client.hpp"
-#include "tick_store.hpp"
+#include "components/ingest/ingestor.hpp"  // 键空间：idx/backfill 约定
+#include "components/redis/resp_client.hpp"
+#include "components/storage/tick_store.hpp"
 
 namespace tickshelf {
 

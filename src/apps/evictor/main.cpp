@@ -15,8 +15,8 @@
 
 #include "common/net.hpp"
 #include "common/startup_config.hpp"
-#include "libtickshelf/evictor.hpp"
-#include "libtickshelf/ingestor.hpp"  // publish_stats
+#include "components/evict/evictor.hpp"
+#include "components/ingest/ingestor.hpp"  // publish_stats
 
 namespace {
 

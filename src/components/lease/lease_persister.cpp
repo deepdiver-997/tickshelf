@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "ingestor.hpp"  // 键辅助：seg_key_of / state_key / lease_key_of
+#include "components/ingest/ingestor.hpp"  // 键辅助：seg_key_of / state_key / lease_key_of
 
 namespace tickshelf {
 namespace {

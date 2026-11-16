@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <vector>
 
-#include "libtickshelf/interval_set.hpp"
+#include "components/coverage/interval_set.hpp"
 
 namespace {
 

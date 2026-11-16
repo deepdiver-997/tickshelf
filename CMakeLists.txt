@@ -31,14 +31,14 @@ add_library(tickshelf_lib STATIC
   src/common/net.cpp
   src/common/startup_config.cpp
   src/common/tick.cpp
-  src/libtickshelf/evictor.cpp
-  src/libtickshelf/frame_parser.cpp
-  src/libtickshelf/ingestor.cpp
-  src/libtickshelf/lease_persister.cpp
-  src/libtickshelf/reader.cpp
-  src/libtickshelf/resp_client.cpp
-  src/libtickshelf/sharded_store.cpp
-  src/libtickshelf/sqlite_store.cpp)
+  src/components/evict/evictor.cpp
+  src/components/ingest/frame_parser.cpp
+  src/components/ingest/ingestor.cpp
+  src/components/lease/lease_persister.cpp
+  src/components/query/reader.cpp
+  src/components/redis/resp_client.cpp
+  src/components/storage/sharded_store.cpp
+  src/components/storage/sqlite_store.cpp)
 target_include_directories(tickshelf_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(tickshelf_lib PUBLIC SQLite3::SQLite3)
@@ -47,26 +47,26 @@ else()
 endif()
 
 # 守护进程（ADR-009 第二层）、租约落盘进程与参考驱动（第三层示例）
-add_executable(tickshelfd src/tickshelfd/main.cpp)
+add_executable(tickshelfd src/apps/tickshelfd/main.cpp)
 target_link_libraries(tickshelfd PRIVATE tickshelf_lib)
 
-add_executable(persister src/persister/main.cpp)
+add_executable(persister src/apps/persister/main.cpp)
 target_link_libraries(persister PRIVATE tickshelf_lib)
 
-add_executable(evictor src/evictor/main.cpp)
+add_executable(evictor src/apps/evictor/main.cpp)
 target_link_libraries(evictor PRIVATE tickshelf_lib)
 
-add_executable(capacity src/capacity/main.cpp)
+add_executable(capacity src/apps/capacity/main.cpp)
 target_link_libraries(capacity PRIVATE tickshelf_lib)
 
-add_executable(queryd src/queryd/main.cpp)
+add_executable(queryd src/apps/queryd/main.cpp)
 target_link_libraries(queryd PRIVATE tickshelf_lib)
 
-add_executable(feedgen src/feedgen/main.cpp)
+add_executable(feedgen src/apps/feedgen/main.cpp)
 target_link_libraries(feedgen PRIVATE tickshelf_lib)
 
 # 灌流驱动（benchmarks.md 未测清单 #1 的工具）：极限摄入基准源，不受 1ms ts 网格限制
-add_executable(floodgen src/floodgen/main.cpp)
+add_executable(floodgen src/apps/floodgen/main.cpp)
 target_link_libraries(floodgen PRIVATE tickshelf_lib)
 
 if(TICKSHELF_BUILD_BENCHMARKS)

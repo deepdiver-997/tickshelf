@@ -8,10 +8,10 @@
 #include <sqlite3.h>
 
 #include "common/civil.hpp"
-#include "libtickshelf/ingestor.hpp"
-#include "libtickshelf/lease_persister.hpp"
-#include "libtickshelf/resp_client.hpp"
-#include "libtickshelf/sqlite_store.hpp"
+#include "components/ingest/ingestor.hpp"
+#include "components/lease/lease_persister.hpp"
+#include "components/redis/resp_client.hpp"
+#include "components/storage/sqlite_store.hpp"
 
 using namespace tickshelf;
 

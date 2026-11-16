@@ -7,7 +7,7 @@
 #include "hash.hpp"
 #include "metrics.hpp"
 #include "store.hpp"
-#include "libtickshelf/resp_client.hpp"
+#include "components/redis/resp_client.hpp"
 
 namespace tickshelf::bench {
 

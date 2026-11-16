@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-#include "libtickshelf/coverage_ledger.hpp"
+#include "components/coverage/coverage_ledger.hpp"
 
 namespace tickshelf {
 // doctest 断言失败时的可读输出

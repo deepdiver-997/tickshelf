@@ -12,8 +12,8 @@
 #include <string>
 #include <vector>
 
-#include "resp_client.hpp"
-#include "tick_store.hpp"
+#include "components/redis/resp_client.hpp"
+#include "components/storage/tick_store.hpp"
 
 namespace tickshelf {
 

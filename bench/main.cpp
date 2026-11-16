@@ -6,7 +6,7 @@
 #include "record.hpp"
 #include "store.hpp"
 #include "common/net.hpp"
-#include "libtickshelf/resp_client.hpp"
+#include "components/redis/resp_client.hpp"
 
 #include <algorithm>
 #include <cerrno>

@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "common/tick.hpp"
-#include "libtickshelf/resp_client.hpp"
+#include "components/redis/resp_client.hpp"
 
 using namespace tickshelf;
 

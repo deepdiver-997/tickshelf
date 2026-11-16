@@ -23,8 +23,8 @@
 #include <string>
 #include <vector>
 
-#include "libtickshelf/resp_client.hpp"
-#include "libtickshelf/sqlite_store.hpp"
+#include "components/redis/resp_client.hpp"
+#include "components/storage/sqlite_store.hpp"
 
 namespace {
 

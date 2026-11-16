@@ -6,7 +6,7 @@
 
 #include "common/civil.hpp"
 #include "common/tick.hpp"
-#include "libtickshelf/ingestor.hpp"
+#include "components/ingest/ingestor.hpp"
 
 using namespace tickshelf;
 

@@ -6,7 +6,7 @@
 #include <mutex>
 #include <thread>
 
-#include "ingestor.hpp"  // tick_symbol
+#include "components/ingest/ingestor.hpp"  // tick_symbol
 
 namespace tickshelf {
 namespace {

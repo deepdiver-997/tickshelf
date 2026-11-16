@@ -21,7 +21,7 @@
 组件 checklist（先核心库直连测试，再包 TCP 前端，见 ADR-009）：
 
 - [x] `common/`：Tick 结构（static_assert(sizeof==64)）、定点价类型（i64, 1e-4）、CRC32
-- [x] `libtickshelf/`：帧解析状态机（半包/粘包）、错帧三道防线（长度互证 / CRC 丢帧继续 / 失步重同步，见 protocol.md）、进程内 ingest API、RESP 客户端（连接 + pipeline ZADD）、攒批定时器（时间片循环）
+- [x] `components/`：帧解析状态机（半包/粘包）、错帧三道防线（长度互证 / CRC 丢帧继续 / 失步重同步，见 protocol.md）、进程内 ingest API、RESP 客户端（连接 + pipeline ZADD）、攒批定时器（时间片循环）
 - [x] `tickshelfd/`：TCP server 前端（TTAP 契约）→ 核心库 ingest；无状态，崩溃即重启
 - [x] `feedgen/`：TCP **client**、速率与突发配置、周期性心跳帧（参考驱动，验证接入契约）
 - [x] `persister/`：SCAN 候选批 → SETNX 租约 → 读批 → upsert → SET 标记

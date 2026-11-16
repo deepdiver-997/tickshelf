@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-#include "ingestor.hpp"  // 键辅助：seg_key_of / idx_key / idx_member / state_key / lease_key_of
+#include "components/ingest/ingestor.hpp"  // 键辅助：seg_key_of / idx_key / idx_member / state_key / lease_key_of
 
 namespace tickshelf {
 namespace {

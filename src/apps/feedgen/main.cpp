@@ -34,8 +34,8 @@
 
 #include "common/frame_writer.hpp"
 #include "common/net.hpp"
-#include "libtickshelf/ingestor.hpp"  // publish_stats / backfill 键助手
-#include "libtickshelf/sqlite_store.hpp"
+#include "components/ingest/ingestor.hpp"  // publish_stats / backfill 键助手
+#include "components/storage/sqlite_store.hpp"
 
 namespace {
 

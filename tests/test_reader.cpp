@@ -5,9 +5,9 @@
 #include <vector>
 
 #include "common/civil.hpp"
-#include "libtickshelf/ingestor.hpp"
-#include "libtickshelf/reader.hpp"
-#include "libtickshelf/sqlite_store.hpp"
+#include "components/ingest/ingestor.hpp"
+#include "components/query/reader.hpp"
+#include "components/storage/sqlite_store.hpp"
 
 using namespace tickshelf;
 

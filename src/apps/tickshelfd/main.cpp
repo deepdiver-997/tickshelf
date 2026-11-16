@@ -21,10 +21,10 @@
 
 #include "common/net.hpp"
 #include "common/startup_config.hpp"
-#include "libtickshelf/frame_parser.hpp"
-#include "libtickshelf/ingestor.hpp"
-#include "libtickshelf/resp_client.hpp"
-#include "libtickshelf/sharded_store.hpp"
+#include "components/ingest/frame_parser.hpp"
+#include "components/ingest/ingestor.hpp"
+#include "components/redis/resp_client.hpp"
+#include "components/storage/sharded_store.hpp"
 
 namespace {
 

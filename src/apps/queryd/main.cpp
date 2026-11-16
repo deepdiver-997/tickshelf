@@ -21,9 +21,9 @@
 #include "common/frame_writer.hpp"
 #include "common/net.hpp"
 #include "common/startup_config.hpp"
-#include "libtickshelf/frame_parser.hpp"
-#include "libtickshelf/reader.hpp"
-#include "libtickshelf/sharded_store.hpp"
+#include "components/ingest/frame_parser.hpp"
+#include "components/query/reader.hpp"
+#include "components/storage/sharded_store.hpp"
 
 namespace {
 

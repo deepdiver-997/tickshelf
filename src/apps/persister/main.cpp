@@ -9,10 +9,10 @@
 #include <thread>
 
 #include "common/startup_config.hpp"
-#include "libtickshelf/ingestor.hpp"  // publish_stats（ADR-013）
-#include "libtickshelf/lease_persister.hpp"
-#include "libtickshelf/resp_client.hpp"
-#include "libtickshelf/sharded_store.hpp"
+#include "components/ingest/ingestor.hpp"  // publish_stats（ADR-013）
+#include "components/lease/lease_persister.hpp"
+#include "components/redis/resp_client.hpp"
+#include "components/storage/sharded_store.hpp"
 
 namespace {
 

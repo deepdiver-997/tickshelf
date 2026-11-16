@@ -5,9 +5,9 @@
 #include <vector>
 
 #include "common/civil.hpp"
-#include "libtickshelf/evictor.hpp"
-#include "libtickshelf/ingestor.hpp"
-#include "libtickshelf/resp_client.hpp"
+#include "components/evict/evictor.hpp"
+#include "components/ingest/ingestor.hpp"
+#include "components/redis/resp_client.hpp"
 
 using namespace tickshelf;
 

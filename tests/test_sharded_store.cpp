@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "libtickshelf/sharded_store.hpp"
+#include "components/storage/sharded_store.hpp"
 
 using namespace tickshelf;
 

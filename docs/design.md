@@ -240,6 +240,12 @@
 - **拒绝的替代**：完整 epoll/kqueue 事件循环 + 回调框架。单线程多路复用只省线程数，不改变任何已测瓶颈（热点在存储提交与发布重试）；每分片专职 worker 已把 Redis I/O 移出收包线程；且违背"RESP/网络手写、零外部框架"的学习目标。Engine 内"发布发送与上一片存储提交重叠"的两阶段 publish/finish 是独立的吞吐优化，评估后再做，不搭车。
 - **边界**：被中断或超时的连接一律视为不可信，调用方 close 后重连（Engine 的懒重连语义不变）；Storage 侧（SQLite 提交）的阻塞 I/O 仍不可中断，drain 报告如实区分。`send/collect` 解耦当前无生产调用方（为后续流水线重叠预留），行为由离线假服务器测试覆盖：半包重组、跨调用留存、截止失败、中断唤醒，均不依赖 redis-server。
 
+## ADR-026 StorageOnly 写策略：历史回填不经 Redis（2026-11-18）
+
+- **背景**：写穿/仅发布都以 Redis 为热缓冲与租约仲裁。历史回填、单写者导入这类"只要落库"的负载不需要热缓冲，却要为每分片维持 Redis 连接并付出发布与 finish 往返——消融表里 `R=0` 行的差值就是这个成本的上界（54k 单轮观测：compact +20%、RocksDB +33%）。
+- **决定**：`WriteMode::StorageOnly`（`--persist storage`，必须 `--engine on`）：Engine 不建 Redis 端口、不发布、不租约仲裁、无 finish；worker 把整片直接交给 `StorageShard`。`committed_input`/`inserted_unique`/`degraded`/`sink_consumed` 与写穿同义；没有 `published`/`skipped`/`finish_pending`。daemon 在此模式跳过 ADR-013 负载键发布（无意义重连也不做），退出检查 `storage_complete`。
+- **边界**：没有租约仲裁——多写者同库只有存储唯一键幂等兜底；不写 `state` HASH，persister/淘汰对这批数据无可处理对象（数据已直接落库）。这不是"更耐久"或"更快"的一般承诺，只是少做了发布义务的口径；交付合同不变（最终提交前允许丢失，Storage 同步强度依实际配置）。
+
 ## 数据模型（Redis）
 
 - ~~行情键 `ts:{symbol}:{yyyymmdd}`（v1 逐 tick ZSET，member=64B Tick 原始字节）~~ — ADR-017 起退役（dev 期 flag-day 换段式；生产期格式迁移走 ADR-018 双读配方）

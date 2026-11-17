@@ -56,10 +56,17 @@ Engine::Engine(EngineConfig config, std::vector<std::unique_ptr<RedisShard>> red
     if (config_.shutdown_ms == 0) config_.shutdown_ms = 1;
     config_.max_pending_records = std::max(config_.max_pending_records, config_.batch_records);
 
-    if (redis_.size() != config_.shards)
-        throw std::invalid_argument("engine: redis shard count mismatch");
-    if (config_.write_mode == WriteMode::WriteThrough && storage_.size() != config_.shards)
-        throw std::invalid_argument("engine: storage shard count mismatch");
+    if (config_.write_mode == WriteMode::StorageOnly) {
+        if (redis_.size() != 0)
+            throw std::invalid_argument("engine: storage-only mode takes no redis shards");
+        if (storage_.size() != config_.shards)
+            throw std::invalid_argument("engine: storage shard count mismatch");
+    } else {
+        if (redis_.size() != config_.shards)
+            throw std::invalid_argument("engine: redis shard count mismatch");
+        if (config_.write_mode == WriteMode::WriteThrough && storage_.size() != config_.shards)
+            throw std::invalid_argument("engine: storage shard count mismatch");
+    }
 
     shards_.reserve(config_.shards);
     for (std::size_t i = 0; i < config_.shards; ++i)
@@ -168,6 +175,31 @@ void Engine::complete(Shard& shard, const SlicePtr& slice) {
 }
 
 void Engine::process(Shard& shard, const SlicePtr& slice) {
+    // StorageOnly（ADR-026）：无 Redis 发布/租约仲裁，全片直接落存储。
+    // 面向历史回填/单写者导入；无 claim/skipped/finish_pending 语义。
+    if (config_.write_mode == WriteMode::StorageOnly) {
+        if (stopping_.load(std::memory_order_acquire)) return;  // not stored
+        std::vector<const std::vector<Tick>*> all;
+        all.reserve(slice->batches.size());
+        for (const auto& batch : slice->batches) all.push_back(&batch.ticks);
+        const std::int64_t inserted = storage_[shard.index]->upsert_flush(all);
+        if (inserted < 0) {
+            shard.degraded_records.fetch_add(slice->records, std::memory_order_relaxed);
+            complete(shard, slice);
+            return;
+        }
+        if (!storage_[shard.index]->persists_records()) {
+            shard.sink_consumed_records.fetch_add(slice->records, std::memory_order_relaxed);
+            complete(shard, slice);
+            return;
+        }
+        shard.committed_input_records.fetch_add(slice->records, std::memory_order_relaxed);
+        shard.inserted_unique_records.fetch_add(static_cast<std::uint64_t>(inserted),
+                                                std::memory_order_relaxed);
+        complete(shard, slice);
+        return;
+    }
+
     FlushOptions options;
     options.claim_lease = config_.write_mode == WriteMode::WriteThrough;
     options.worker_id = config_.worker_id + "-" + std::to_string(shard.index);
@@ -278,7 +310,8 @@ DrainReport Engine::drain_report() const {
     report.degraded_records = current.degraded_records;
     report.publish_only_records = current.publish_only_records;
     report.complete = report.queue_complete = report.pending_records == 0;
-    report.storage_complete = report.queue_complete && config_.write_mode == WriteMode::WriteThrough &&
+    report.storage_complete = report.queue_complete &&
+        config_.write_mode != WriteMode::PublishOnly &&
         current.committed_input_records == current.accepted_records - current.dedup_dropped &&
         std::all_of(storage_.begin(), storage_.end(),
                     [](const auto& store) { return store->persists_records(); });

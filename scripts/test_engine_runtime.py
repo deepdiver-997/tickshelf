@@ -206,6 +206,35 @@ class EngineRuntimeTests(unittest.TestCase):
         child.wait(timeout=5)
         self.processes.stop(name, timeout=5)
 
+    def test_storage_only_persists_without_any_redis_connection(self):
+        # persist=storage（ADR-026）不建 Redis 连接：把 [redis] 指向一个确定无人
+        # 监听的端口，daemon 仍须完成全部落库——证明零 Redis 依赖。
+        unused_port, = candidate_ports(1)
+        text = self.config.read_text().replace("persist = sqlite", "persist = storage")
+        text = text.replace(f"port = {self.redis_port}", f"port = {unused_port}", 1)
+        self.config.write_text(text)
+        self.start_daemon()
+        manifest = write_input(self.directory / "storage-only.ticks", 64, 8, 0)
+        send_ticks(self.daemon_port, [tick_bytes(i, 8) for i in range(64)])
+
+        wait_until(lambda: db_rows(self.db, self.shards) == (64, 64), timeout=10,
+                   description="storage-only durable rows without Redis",
+                   processes=self.processes, names=("tickshelfd",))
+        self.assertEqual(self.processes.stop("tickshelfd", timeout=10), 0,
+                         self.processes.text("tickshelfd"))
+        log = self.processes.text("tickshelfd")
+        self.assertNotIn("drain incomplete", log)
+        self.assertRegex(log, r"engine ingested=64 .*accepted=64 ")
+        self.assertTrue(verify_sqlite(self.db, self.shards, manifest)["passed"])
+
+    def test_storage_mode_without_engine_is_rejected(self):
+        text = self.config.read_text().replace("persist = sqlite", "persist = storage")
+        text = text.replace("engine = true", "engine = false")
+        self.config.write_text(text)
+        child = self.processes.start("reject", [BUILD / "tickshelfd", "--config", self.config])
+        self.assertEqual(child.wait(timeout=5), 1, self.processes.text("reject"))
+        self.assertIn("--persist storage requires --engine", self.processes.text("reject"))
+
     def test_kill9_leaves_recoverable_pending_for_persister(self):
         if not (BUILD / "persister").is_file():
             self.skipTest("persister not built")

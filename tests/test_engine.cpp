@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -557,4 +558,75 @@ TEST_CASE("Engine: drain 超时会 interrupt 阻塞中的 Redis 适配器并立�
     CHECK_FALSE(report.queue_complete);
     CHECK_FALSE(report.storage_complete);
     CHECK(report.pending_records == 2);
+}
+
+TEST_CASE("Engine: storage-only 直落存储——无发布无租约，完成即提交") {
+    auto config = config_for(WriteMode::StorageOnly);
+    auto storage = std::make_unique<FakeStorage>();
+    auto* storage_ptr = storage.get();
+    std::vector<std::unique_ptr<RedisShard>> no_redis;
+    std::vector<std::unique_ptr<StorageShard>> storage_shards;
+    storage_shards.push_back(std::move(storage));
+    Engine engine(config, std::move(no_redis), std::move(storage_shards));
+
+    const std::vector<Tick> ticks = {make_tick("A", 1), make_tick("A", 2), make_tick("A", 3)};
+    REQUIRE(engine.submit(ticks, 0) == 3);
+    const auto report = engine.drain(2000ms);
+    CHECK(report.queue_complete);
+    CHECK(report.storage_complete);
+    CHECK(report.committed_input_records == 3);
+    CHECK(report.inserted_unique_records == 3);
+    CHECK(report.published_records == 0);
+    CHECK(report.pending_records == 0);
+    CHECK(storage_ptr->stored_records() == 3);
+    const auto stats = engine.stats();
+    CHECK(stats.finish_pending_records == 0);
+    CHECK(stats.publish_only_records == 0);
+    CHECK(stats.skipped_records == 0);
+    CHECK(stats.degraded_records == 0);
+    CHECK(stats.durable_records == 3);
+}
+
+TEST_CASE("Engine: storage-only 拒绝 Redis 端口并把存储失败记为 degraded") {
+    auto config = config_for(WriteMode::StorageOnly);
+    {
+        std::vector<std::unique_ptr<RedisShard>> redis_shards;
+        redis_shards.push_back(std::make_unique<FakeRedis>());
+        std::vector<std::unique_ptr<StorageShard>> storage_shards;
+        storage_shards.push_back(std::make_unique<FakeStorage>());
+        CHECK_THROWS_AS(Engine(config, std::move(redis_shards), std::move(storage_shards)),
+                        std::invalid_argument);
+    }
+    auto storage = std::make_unique<FakeStorage>();
+    auto* storage_ptr = storage.get();
+    storage_ptr->fail_times.store(1);
+    std::vector<std::unique_ptr<RedisShard>> no_redis;
+    std::vector<std::unique_ptr<StorageShard>> storage_shards;
+    storage_shards.push_back(std::move(storage));
+    Engine engine(config, std::move(no_redis), std::move(storage_shards));
+    const std::vector<Tick> ticks = {make_tick("B", 1), make_tick("B", 2)};
+    REQUIRE(engine.submit(ticks, 0) == 2);
+    const auto report = engine.drain(2000ms);
+    CHECK_FALSE(report.storage_complete);
+    CHECK(report.degraded_records == 2);
+    CHECK(report.committed_input_records == 0);
+    CHECK(storage_ptr->calls.load() == 1);
+}
+
+TEST_CASE("Engine: storage-only Null sink 记 sink_consumed 而非耐久") {
+    auto config = config_for(WriteMode::StorageOnly);
+    auto storage = std::make_unique<FakeStorage>();
+    storage->persistent = false;
+    std::vector<std::unique_ptr<RedisShard>> no_redis;
+    std::vector<std::unique_ptr<StorageShard>> storage_shards;
+    storage_shards.push_back(std::move(storage));
+    Engine engine(config, std::move(no_redis), std::move(storage_shards));
+    const std::vector<Tick> ticks = {make_tick("C", 1), make_tick("C", 2)};
+    REQUIRE(engine.submit(ticks, 0) == 2);
+    const auto report = engine.drain(2000ms);
+    CHECK(report.queue_complete);
+    CHECK_FALSE(report.storage_complete);
+    CHECK(report.sink_consumed_records == 2);
+    CHECK(report.committed_input_records == 0);
+    CHECK(report.inserted_unique_records == 0);
 }

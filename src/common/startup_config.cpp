@@ -55,7 +55,7 @@ const Spec kSchema[] = {
     {"tickshelfd", "port", "--port", "port", kDaemon, &Options::port, "P", 1, 65535},
     {"tickshelfd", "flush_interval_ms", "--flush-interval-ms", "flush_interval_ms", kDaemon,
      &Options::flush_interval_ms, "MS", 1, kMaxIntervalMs},
-    {"tickshelfd", "persist", "--persist", "persist", kDaemon, &Options::persist, "none|sqlite"},
+    {"tickshelfd", "persist", "--persist", "persist", kDaemon, &Options::persist, "none|sqlite|storage"},
     {"tickshelfd", "engine", "--engine", "engine", kDaemon, &Options::engine, nullptr},
     {"tickshelfd", "engine_batch_records", "--engine-batch-records", "engine_batch_records", kDaemon,
      &Options::engine_batch_records, "N", 1},
@@ -220,8 +220,9 @@ void assign(Options& options, const Spec& spec, const std::string& text, const s
         using T = std::remove_reference_t<decltype(options.*member)>;
         if constexpr (std::is_same_v<T, std::string>) {
             if (text.empty() || !valid_utf8(text)) fail(where, "expected a nonempty UTF-8 string without NUL");
-            if (member == &Options::persist && text != "none" && text != "sqlite")
-                fail(where, "persist must be none|sqlite");
+            if (member == &Options::persist && text != "none" && text != "sqlite" &&
+                text != "storage")
+                fail(where, "persist must be none|sqlite|storage");
             options.*member = text;
         } else if constexpr (std::is_same_v<T, bool>) {
             if (text != "true" && text != "false") fail(where, "expected true or false");

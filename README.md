@@ -78,7 +78,7 @@ ACL/缺失/错误及版本/PID；不修改外部 Redis，且不接入无网络�
 # CLI 覆盖示例：--engine --persist sqlite --shards 4 --engine-batch-records 8192
 ```
 
-`--engine off`（默认）保持原同步 flush。写穿/仅发布由 `--persist sqlite|none` 决定；引擎为每分片开一条 Redis 连接和一个 SQLite 分片文件，文件布局/路由与 `ShardedTickStore` 一致，persister/queryd 继续兼容。私有端到端：`python3 scripts/test_engine_runtime.py --build build`；旧/新网络对比：`python3 scripts/engine_bench.py --suite network --build build-release --duration 2 --rate 250000 --senders 4 --output /tmp/my-new-engine-network`（新目录）。原生八格用 `--suite native`，见 [消融实验说明](docs/ablation-benchmark.md)。实测边界见 [ADR-023](docs/design.md) 与 [历史引擎实测](docs/engine-refactor-20261115.md)。
+`--engine off`（默认）保持原同步 flush。写穿/仅发布/直落存储由 `--persist sqlite|none|storage` 决定（`storage` 为历史回填直落库，不开 Redis，ADR-026）；引擎为每分片开一条 Redis 连接和一个 SQLite 分片文件，文件布局/路由与 `ShardedTickStore` 一致，persister/queryd 继续兼容。私有端到端：`python3 scripts/test_engine_runtime.py --build build`；旧/新网络对比：`python3 scripts/engine_bench.py --suite network --build build-release --duration 2 --rate 250000 --senders 4 --output /tmp/my-new-engine-network`（新目录）。原生八格用 `--suite native`，见 [消融实验说明](docs/ablation-benchmark.md)。实测边界见 [ADR-023](docs/design.md) 与 [历史引擎实测](docs/engine-refactor-20261115.md)。
 
 **五档 JSON / 变长 Record 性能实验台（可选，非生产 TTAP 接口）**：
 

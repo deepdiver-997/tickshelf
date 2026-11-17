@@ -102,6 +102,12 @@ public:
             return false;
         }
         tickshelf::net::set_nonblock(listen_fd_.get(), true);
+        if (opt_.persist == "storage" && !opt_.engine) {
+            std::fprintf(stderr,
+                         "tickshelfd: --persist storage requires --engine on "
+                         "(classic path has no direct-to-storage mode)\n");
+            return false;
+        }
         if (opt_.engine) {
             if (!start_engine()) return false;
         } else if (opt_.persist == "sqlite") {
@@ -172,8 +178,9 @@ public:
                 print_stats();
                 next_stats = now2 + 10000;
             }
-            // 负载暴露（ADR-013）：观测用，发布失败静默
-            if (now2 >= next_publish) {
+            // 负载暴露（ADR-013）：观测用，发布失败静默。StorageOnly 没有 Redis
+            // 端口，负载键发布整体跳过（也不做无意义的重连尝试）。
+            if (now2 >= next_publish && !engine_storage_only_) {
                 char body[2048];
                 const std::uint64_t stall_avg =
                     stats_.stall_count ? stats_.stall_sum_ms / stats_.stall_count : 0;
@@ -243,7 +250,7 @@ public:
             const auto report = engine_->drain(
                 remaining.count() > 0 ? remaining : std::chrono::milliseconds(0));
             if (!report.queue_complete || !retry_ticks_.empty() ||
-                (opt_.persist == "sqlite" && !report.storage_complete))
+                (engine_durable_mode_ && !report.storage_complete))
                 std::fprintf(stderr,
                              "tickshelfd: WARNING engine drain incomplete pending=%llu committed_input=%llu "
                              "degraded=%llu retry_buf=%zu\n",
@@ -277,10 +284,12 @@ private:
         cfg.retry_ms = opt_.engine_retry_ms;
         cfg.shutdown_ms = opt_.engine_shutdown_ms;
 
-        auto redis_shards =
-            tickshelf::make_redis_shards(opt_.redis_host, opt_.redis_port, cfg.shards);
+        auto redis_shards = cfg.write_mode == tickshelf::WriteMode::StorageOnly
+                                ? std::vector<std::unique_ptr<tickshelf::RedisShard>>{}
+                                : tickshelf::make_redis_shards(opt_.redis_host, opt_.redis_port,
+                                                               cfg.shards);
         std::vector<std::unique_ptr<tickshelf::StorageShard>> storage_shards;
-        if (cfg.write_mode == tickshelf::WriteMode::WriteThrough) {
+        if (cfg.write_mode != tickshelf::WriteMode::PublishOnly) {
             storage_shards = tickshelf::make_sqlite_storage_shards(opt_.db, cfg.shards);
             if (storage_shards.size() != cfg.shards) {
                 std::fprintf(stderr, "tickshelfd: cannot open engine db %s (%zu shards)\n",
@@ -295,6 +304,8 @@ private:
             std::fprintf(stderr, "tickshelfd: engine start failed: %s\n", e.what());
             return false;
         }
+        engine_storage_only_ = cfg.write_mode == tickshelf::WriteMode::StorageOnly;
+        engine_durable_mode_ = tickshelf::persists_final_records(cfg.write_mode);
         return true;
     }
 
@@ -540,6 +551,8 @@ private:
     std::unique_ptr<tickshelf::TickStore> store_;  // N=1 单文件 / N>1 分片（ADR-020）
     std::unique_ptr<tickshelf::Engine> engine_;    // --engine on 时替代旧 flush 路径
     std::vector<tickshelf::Tick> retry_ticks_;     // Engine 背压留下的未接收尾部
+    bool engine_storage_only_ = false;  // Engine StorageOnly：无 Redis，跳过负载发布
+    bool engine_durable_mode_ = false;  // WriteThrough/StorageOnly：退出时检查 storage_complete
     DaemonStats stats_;
 };
 

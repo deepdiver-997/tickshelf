@@ -192,7 +192,7 @@ unchanged: one shard uses `db`, multiple shards use `db.0`, `db.1`, etc.
 | `bind` | `--bind H` | `127.0.0.1` | Nonempty string |
 | `port` | `--port P` | `9900` | Integer 1–65535 |
 | `flush_interval_ms` | `--flush-interval-ms MS` | `500` | Positive millisecond interval |
-| `persist` | `--persist none\|sqlite` | `none` | `none`: classic persister read-back; `sqlite`: write-through |
+| `persist` | `--persist none\|sqlite\|storage` | `none` | `none`: classic persister read-back; `sqlite`: write-through; `storage`: direct-to-storage, engine only |
 | `engine` | `--engine` / `--no-engine` | `false` | Sharded async persistence engine (ADR-023); off keeps the original flush path byte-for-byte |
 | `engine_batch_records` | `--engine-batch-records N` | `8192` | Soft slice limit per shard (≥1); a `(symbol,date)` group may overshoot |
 | `engine_batch_bytes` | `--engine-batch-bytes N` | `4194304` | Byte trigger; `0` disables it |
@@ -210,8 +210,14 @@ still selects the original `none` mode. Storage settings are validated and
 included in effective JSON even when `persist=none`.
 
 When `engine=true`, `persist=sqlite` selects write-through (publish + claim +
-storage + exact `done` set) and `persist=none` selects publish-only. The engine
-opens N Redis connections and, for write-through, N SQLite shard files using the
+storage + exact `done` set) and `persist=none` selects publish-only.
+`persist=storage` selects storage-only (ADR-026): no Redis connections, no
+publish, no lease arbitration and no `done` bookkeeping — the worker hands each
+slice straight to the storage shard. It targets backfill/single-writer imports;
+multi-writer setups have only the storage unique key as idempotence, and the
+daemon skips the ADR-013 stats publishing because there is no Redis port. The
+engine opens N Redis connections and, for write-through/storage, N SQLite shard
+files using the
 same `db`/`db.i` layout and symbol routing as `ShardedTickStore`, so persister and
 queryd remain compatible. It is off by default; the original synchronous flush
 path is unchanged unless explicitly enabled.

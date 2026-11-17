@@ -32,7 +32,10 @@ struct Engine::Shard {
     std::atomic<std::uint64_t> rejected{0};
     std::atomic<std::uint64_t> dedup_dropped{0};
     std::atomic<std::uint64_t> sealed_slices{0};
-    std::atomic<std::uint64_t> durable_records{0};
+    std::atomic<std::uint64_t> published_records{0};
+    std::atomic<std::uint64_t> committed_input_records{0};
+    std::atomic<std::uint64_t> inserted_unique_records{0};
+    std::atomic<std::uint64_t> sink_consumed_records{0};
     std::atomic<std::uint64_t> publish_only_records{0};
     std::atomic<std::uint64_t> skipped_records{0};
     std::atomic<std::uint64_t> degraded_records{0};
@@ -172,6 +175,7 @@ void Engine::process(Shard& shard, const SlicePtr& slice) {
 
     std::vector<char> claimed;
     for (;;) {
+        if (stopping_.load(std::memory_order_acquire)) return;
         claimed.clear();
         if (redis_[shard.index]->publish_and_claim(slice->batches, options, claimed)) break;
         if (stopping_.load(std::memory_order_relaxed)) return;  // 未发布：保留 pending 计数
@@ -180,9 +184,11 @@ void Engine::process(Shard& shard, const SlicePtr& slice) {
         const auto shift = std::min<std::uint32_t>(slice->attempts, 6);
         std::uint64_t delay = config_.retry_ms;
         for (std::uint32_t i = 0; i < shift; ++i)
-            delay = std::min<std::uint64_t>(delay * 2, config_.max_retry_ms);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            delay = delay >= config_.max_retry_ms / 2
+                        ? config_.max_retry_ms : delay * 2;
+        if (!retry_wait(delay)) return;
     }
+    shard.published_records.fetch_add(slice->records, std::memory_order_relaxed);
     slice->claimed = claimed;
 
     if (config_.write_mode == WriteMode::PublishOnly) {
@@ -209,36 +215,74 @@ void Engine::process(Shard& shard, const SlicePtr& slice) {
     const std::uint64_t skipped = slice->records - mine_records;
     if (skipped > 0) shard.skipped_records.fetch_add(skipped, std::memory_order_relaxed);
 
+    if (stopping_.load(std::memory_order_acquire)) return; // published, but not stored
     const std::int64_t inserted = storage_[shard.index]->upsert_flush(mine);
     if (inserted < 0) {
         // 数据仍在 Redis、state pending；释放自己的租约，让 persister 补偿。
-        redis_[shard.index]->release(mine_ids);
+        if (!stopping_.load(std::memory_order_acquire)) redis_[shard.index]->release(mine_ids);
         shard.degraded_records.fetch_add(mine_records, std::memory_order_relaxed);
         complete(shard, slice);
         return;
     }
 
+    if (!storage_[shard.index]->persists_records()) {
+        // A Null/counting sink must never mark real Redis records as stored/done.
+        shard.sink_consumed_records.fetch_add(mine_records, std::memory_order_relaxed);
+        if (!stopping_.load(std::memory_order_acquire)) redis_[shard.index]->release(mine_ids);
+        complete(shard, slice);
+        return;
+    }
+    shard.committed_input_records.fetch_add(mine_records, std::memory_order_relaxed);
+    shard.inserted_unique_records.fetch_add(static_cast<std::uint64_t>(inserted),
+                                            std::memory_order_relaxed);
     bool finished = false;
     for (std::uint64_t attempt = 0; attempt < config_.finish_attempts; ++attempt) {
+        if (stopping_.load(std::memory_order_acquire)) break;
         if (redis_[shard.index]->finish(mine_ids)) {
             finished = true;
             break;
         }
-        if (stopping_.load(std::memory_order_relaxed)) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(config_.retry_ms));
+        if (attempt + 1 < config_.finish_attempts && !retry_wait(config_.retry_ms)) break;
     }
     if (!finished) shard.finish_pending_records.fetch_add(mine_records, std::memory_order_relaxed);
-    // 数据已耐久；收尾失败只影响 state/lease，由 TTL + persister 收敛。
-    shard.durable_records.fetch_add(mine_records, std::memory_order_relaxed);
+    // Commit input and newly inserted rows are distinct; finish is Redis bookkeeping.
     complete(shard, slice);
+}
+
+bool Engine::retry_wait(std::uint64_t delay_ms) {
+    std::unique_lock<std::mutex> lock(done_mutex_);
+    return !done_cv_.wait_for(lock, std::chrono::milliseconds(delay_ms),
+                              [&] { return stopping_.load(std::memory_order_acquire); });
 }
 
 void Engine::worker_loop(Shard& shard) {
     for (;;) {
         SlicePtr slice;
         if (!shard.ready.pop_wait(slice)) return;
+        // close() normally drains a queue. Shutdown must not start one potentially
+        // blocking adapter call per remaining slice after the drain budget expires.
+        if (stopping_.load(std::memory_order_acquire)) return;
         process(shard, slice);
     }
+}
+
+DrainReport Engine::drain_report() const {
+    const auto current = stats();
+    DrainReport report;
+    report.pending_records = current.pending_records;
+    report.published_records = current.published_records;
+    report.committed_input_records = current.committed_input_records;
+    report.inserted_unique_records = current.inserted_unique_records;
+    report.sink_consumed_records = current.sink_consumed_records;
+    report.durable_records = current.durable_records;
+    report.degraded_records = current.degraded_records;
+    report.publish_only_records = current.publish_only_records;
+    report.complete = report.queue_complete = report.pending_records == 0;
+    report.storage_complete = report.queue_complete && config_.write_mode == WriteMode::WriteThrough &&
+        current.committed_input_records == current.accepted_records - current.dedup_dropped &&
+        std::all_of(storage_.begin(), storage_.end(),
+                    [](const auto& store) { return store->persists_records(); });
+    return report;
 }
 
 bool Engine::wait_idle(std::chrono::milliseconds timeout) {
@@ -247,16 +291,7 @@ bool Engine::wait_idle(std::chrono::milliseconds timeout) {
 }
 
 DrainReport Engine::drain(std::chrono::milliseconds timeout) {
-    DrainReport report;
-    if (stopped_.load(std::memory_order_acquire)) {
-        const auto current = stats();
-        report.pending_records = current.pending_records;
-        report.durable_records = current.durable_records;
-        report.degraded_records = current.degraded_records;
-        report.publish_only_records = current.publish_only_records;
-        report.complete = report.pending_records == 0;
-        return report;
-    }
+    if (stopped_.load(std::memory_order_acquire)) return drain_report();
 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
 
@@ -301,19 +336,17 @@ DrainReport Engine::drain(std::chrono::milliseconds timeout) {
 
     // drain 期间不提前置 stopping：worker 仍可在整个 deadline 内重试发布。
     // 超时后才停止重试并排空/放弃，未完成的 pending 会如实出现在报告里。
-    stopping_.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(done_mutex_);
+        stopping_.store(true, std::memory_order_release);
+    }
+    done_cv_.notify_all(); // interrupt retry backoff; already-blocking I/O still has to return
     for (auto& ptr : shards_) ptr->ready.close();
     for (auto& ptr : shards_)
         if (ptr->worker.joinable()) ptr->worker.join();
     stopped_.store(true, std::memory_order_release);
 
-    const auto current = stats();
-    report.pending_records = current.pending_records;
-    report.durable_records = current.durable_records;
-    report.degraded_records = current.degraded_records;
-    report.publish_only_records = current.publish_only_records;
-    report.complete = report.pending_records == 0;
-    return report;
+    return drain_report();
 }
 
 void Engine::stop() {
@@ -331,7 +364,11 @@ EngineStats Engine::stats() const {
         st.rejected_records = shard.rejected.load(std::memory_order_relaxed);
         st.dedup_dropped = shard.dedup_dropped.load(std::memory_order_relaxed);
         st.sealed_slices = shard.sealed_slices.load(std::memory_order_relaxed);
-        st.durable_records = shard.durable_records.load(std::memory_order_relaxed);
+        st.published_records = shard.published_records.load(std::memory_order_relaxed);
+        st.committed_input_records = shard.committed_input_records.load(std::memory_order_relaxed);
+        st.inserted_unique_records = shard.inserted_unique_records.load(std::memory_order_relaxed);
+        st.sink_consumed_records = shard.sink_consumed_records.load(std::memory_order_relaxed);
+        st.durable_records = st.committed_input_records;
         st.publish_only_records = shard.publish_only_records.load(std::memory_order_relaxed);
         st.skipped_records = shard.skipped_records.load(std::memory_order_relaxed);
         st.degraded_records = shard.degraded_records.load(std::memory_order_relaxed);
@@ -346,6 +383,10 @@ EngineStats Engine::stats() const {
         out.rejected_records += st.rejected_records;
         out.dedup_dropped += st.dedup_dropped;
         out.sealed_slices += st.sealed_slices;
+        out.published_records += st.published_records;
+        out.committed_input_records += st.committed_input_records;
+        out.inserted_unique_records += st.inserted_unique_records;
+        out.sink_consumed_records += st.sink_consumed_records;
         out.durable_records += st.durable_records;
         out.publish_only_records += st.publish_only_records;
         out.skipped_records += st.skipped_records;

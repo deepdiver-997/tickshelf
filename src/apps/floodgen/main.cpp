@@ -12,6 +12,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
+#include <charconv>
+#include <cmath>
+#include <limits>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -38,6 +42,21 @@ double steady_s() {
         .count();
 }
 
+template <typename T>
+bool integer(const char* text, T& value) {
+    const char* end = text + std::strlen(text);
+    const auto result = std::from_chars(text, end, value);
+    return result.ec == std::errc{} && result.ptr == end;
+}
+
+bool real(const char* text, double& value) {
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtod(text, &end);
+    return text[0] != '\0' && end != text && *end == '\0' && errno != ERANGE &&
+           std::isfinite(value);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -52,27 +71,43 @@ int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--host") host = argv[++i];
-        else if (a == "--port") port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
-        else if (a == "--symbols") symbols = std::atoi(argv[++i]);
-        else if (a == "--sym-base") sym_base = std::atoi(argv[++i]);
-        else if (a == "--ts-base") ts_base = std::strtoull(argv[++i], nullptr, 10);
-        else if (a == "--ticks-per-frame") ticks_per_frame = std::atoi(argv[++i]);
-        else if (a == "--rate") rate = std::atof(argv[++i]);
-        else if (a == "--duration") duration_s = std::atof(argv[++i]);
+        if (i + 1 >= argc) {
+            std::fprintf(stderr, "floodgen: missing value for %s\n", a.c_str());
+            return 2;
+        }
+        const char* value = argv[++i];
+        bool valid = true;
+        if (a == "--host") { host = value; valid = !host.empty(); }
+        else if (a == "--port") valid = integer(value, port) && port != 0;
+        else if (a == "--symbols") valid = integer(value, symbols);
+        else if (a == "--sym-base") valid = integer(value, sym_base);
+        else if (a == "--ts-base") valid = integer(value, ts_base);
+        else if (a == "--ticks-per-frame") valid = integer(value, ticks_per_frame);
+        else if (a == "--rate") valid = real(value, rate);
+        else if (a == "--duration") valid = real(value, duration_s);
         else {
             std::fprintf(stderr,
                          "usage: floodgen [--host H] [--port P] [--symbols N] [--sym-base N] "
                          "[--ts-base N] [--ticks-per-frame N] [--rate R] [--duration S]\n");
             return 2;
         }
+        if (!valid) {
+            std::fprintf(stderr, "floodgen: invalid value for %s\n", a.c_str());
+            return 2;
+        }
     }
-    if (symbols <= 0 || ticks_per_frame <= 0) return 2;
-    if (ticks_per_frame > static_cast<int>(kMaxFramePayloadBytes / kTickBytes))
-        ticks_per_frame = static_cast<int>(kMaxFramePayloadBytes / kTickBytes);
+    if (symbols <= 0 || symbols > 1000000 || sym_base < 0 || sym_base > 9999999 ||
+        symbols > 10000000 - sym_base || ticks_per_frame <= 0 ||
+        ticks_per_frame > static_cast<int>(kMaxFramePayloadBytes / kTickBytes) ||
+        rate < 0 || rate > 1e9 || duration_s < 0 || duration_s > 86400 ||
+        ts_base >= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) - 1) {
+        std::fprintf(stderr, "floodgen: input outside supported range\n");
+        return 2;
+    }
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
 
     const int fd = net::tcp_connect(host, port);
     if (fd < 0) {
@@ -86,8 +121,11 @@ int main(int argc, char** argv) {
     // symbol 表（"F" + 7 位十进制 = 8B 无 NUL，批 id 切分安全）+ 每 symbol ts 计数器
     std::vector<std::array<char, 8>> syms(static_cast<std::size_t>(symbols));
     std::vector<std::uint64_t> ts(static_cast<std::size_t>(symbols), ts_base);
-    for (int i = 0; i < symbols; ++i)
-        std::snprintf(syms[static_cast<std::size_t>(i)].data(), 9, "F%07d", sym_base + i);
+    for (int i = 0; i < symbols; ++i) {
+        char text[9]; // include terminator locally, copy exactly the eight wire bytes
+        if (std::snprintf(text, sizeof(text), "F%07d", sym_base + i) != 8) return 2;
+        std::memcpy(syms[static_cast<std::size_t>(i)].data(), text, 8);
+    }
 
     std::vector<Tick> buf(static_cast<std::size_t>(ticks_per_frame));
     std::uint64_t sent_ticks = 0, sent_frames = 0, prev_report = 0;
@@ -106,7 +144,11 @@ int main(int argc, char** argv) {
             Tick& t = buf[j];
             const std::size_t s = gen_idx++ % syms.size();
             std::memcpy(t.symbol, syms[s].data(), 8);
-            t.ts_exchange_ms = ++ts[static_cast<std::size_t>(s)];
+            if (ts[s] >= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) - 1) {
+                std::fprintf(stderr, "floodgen: timestamp range exhausted\n");
+                return 2;
+            }
+            t.ts_exchange_ms = ++ts[s];
             t.ts_receive_ms = t.ts_exchange_ms + 1;
             t.bid_price = 10000000 + static_cast<std::int64_t>(ts[static_cast<std::size_t>(s)] % 1000);
             t.ask_price = t.bid_price + 100;

@@ -108,6 +108,9 @@ private:
 
 class FakeStorage : public StorageShard {
 public:
+    bool persists_records() const override { return persistent; }
+    bool persistent = true;
+    std::int64_t inserted_result = -2; // -2 = count every input; 0 models replayed keys
     std::int64_t upsert_flush(const std::vector<const std::vector<Tick>*>& batches) override {
         calls.fetch_add(1, std::memory_order_relaxed);
         if (fail_times.load(std::memory_order_relaxed) > 0) {
@@ -119,7 +122,7 @@ public:
         const auto n = flat.size();
         std::lock_guard<std::mutex> lock(mutex_);
         stored.push_back(std::move(flat));
-        return static_cast<std::int64_t>(n);
+        return inserted_result == -2 ? static_cast<std::int64_t>(n) : inserted_result;
     }
 
     std::size_t stored_records() const {
@@ -411,4 +414,97 @@ TEST_CASE("Engine: 两分片各自路由与独立 worker") {
     CHECK(first->published_records() == 1);
     CHECK(second->published_records() == 1);
     CHECK(engine.drain(2000ms).complete);
+}
+
+TEST_CASE("Engine: queue completion is not persistent storage completion") {
+    auto publish = make_harness(config_for(WriteMode::PublishOnly));
+    const std::vector<Tick> ticks = {make_tick("A", 1), make_tick("A", 2)};
+    REQUIRE(publish.engine->submit(ticks, 0) == 2);
+    const auto published = publish.engine->drain(2000ms);
+    CHECK(published.queue_complete);
+    CHECK_FALSE(published.storage_complete);
+    CHECK(published.published_records == 2);
+    CHECK(published.committed_input_records == 0);
+    CHECK(published.inserted_unique_records == 0);
+    CHECK(published.sink_consumed_records == 0);
+
+    auto null = make_harness(config_for(WriteMode::WriteThrough));
+    null.storage->persistent = false;
+    REQUIRE(null.engine->submit(ticks, 0) == 2);
+    const auto consumed = null.engine->drain(2000ms);
+    CHECK(consumed.complete);
+    CHECK(consumed.queue_complete);
+    CHECK_FALSE(consumed.storage_complete);
+    CHECK(consumed.sink_consumed_records == 2);
+    CHECK(consumed.committed_input_records == 0);
+    CHECK(consumed.inserted_unique_records == 0);
+    CHECK(consumed.durable_records == 0);
+    CHECK(null.redis->finished_count() == 0); // never mark real Redis done for Null
+    CHECK(null.redis->released_count() == 1);
+
+    auto failed = make_harness(config_for(WriteMode::WriteThrough));
+    failed.storage->fail_times.store(1);
+    REQUIRE(failed.engine->submit(ticks, 0) == 2);
+    const auto degraded = failed.engine->drain(2000ms);
+    CHECK(degraded.queue_complete);
+    CHECK_FALSE(degraded.storage_complete);
+    CHECK(degraded.committed_input_records == 0);
+    CHECK(degraded.degraded_records == 2);
+}
+
+TEST_CASE("Engine: committed input and new unique inserts are different") {
+    auto harness = make_harness(config_for(WriteMode::WriteThrough));
+    harness.storage->inserted_result = 0;
+    const std::vector<Tick> ticks = {make_tick("A", 1), make_tick("A", 1)};
+    REQUIRE(harness.engine->submit(ticks, 0) == 2);
+    const auto report = harness.engine->drain(2000ms);
+    CHECK(report.storage_complete);
+    CHECK(report.committed_input_records == 2);
+    CHECK(report.durable_records == 2);
+    CHECK(report.inserted_unique_records == 0);
+    CHECK(harness.engine->stats().shards[0].committed_input_records == 2);
+}
+
+TEST_CASE("Engine: drain wakes a long retry backoff") {
+    auto config = config_for(WriteMode::PublishOnly);
+    config.retry_ms = 5000;
+    config.max_retry_ms = 5000;
+    auto harness = make_harness(config);
+    harness.redis->fail_publish.store(100);
+    const std::vector<Tick> ticks = {make_tick("A", 1), make_tick("A", 2)};
+    REQUIRE(harness.engine->submit(ticks, 0) == 2);
+    const auto until = std::chrono::steady_clock::now() + 1s;
+    while (harness.engine->stats().retries == 0 && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(1ms);
+    const auto start = std::chrono::steady_clock::now();
+    const auto report = harness.engine->drain(5ms);
+    CHECK(std::chrono::steady_clock::now() - start < 500ms);
+    CHECK_FALSE(report.queue_complete);
+    CHECK(report.pending_records == 2);
+    CHECK(harness.redis->publish_calls.load() == 1);
+}
+
+TEST_CASE("Engine: expired drain does not start blocking I/O for every queued slice") {
+    auto config = config_for(WriteMode::WriteThrough);
+    config.batch_records = 1;
+    config.inflight = 8;
+    auto harness = make_harness(config);
+    harness.redis->block.store(true);
+    const std::vector<Tick> ticks = {make_tick("A", 1), make_tick("A", 2),
+                                    make_tick("A", 3), make_tick("A", 4)};
+    REQUIRE(harness.engine->submit(ticks, 0) == 4);
+    const auto until = std::chrono::steady_clock::now() + 1s;
+    while (harness.redis->publish_calls.load() == 0 && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(1ms);
+    // Already-entered I/O is not interruptible: release it after the drain budget.
+    std::thread release([&] { std::this_thread::sleep_for(50ms); harness.redis->unblock(); });
+    const auto report = harness.engine->drain(5ms);
+    release.join();
+    CHECK_FALSE(report.queue_complete);
+    CHECK_FALSE(report.storage_complete);
+    CHECK(report.pending_records == 4);
+    CHECK(report.published_records == 1);
+    CHECK(report.committed_input_records == 0);
+    CHECK(harness.redis->publish_calls.load() == 1);
+    CHECK(harness.storage->calls.load() == 0);
 }

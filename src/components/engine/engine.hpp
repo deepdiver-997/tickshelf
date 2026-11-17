@@ -43,6 +43,9 @@ class StorageShard {
 public:
     virtual ~StorageShard() = default;
     virtual std::int64_t upsert_flush(const std::vector<const std::vector<Tick>*>& batches) = 0;
+    // Successful calls commit input to a record store, not a counting/Null sink.
+    // This capability alone makes no power-loss or synchronous=FULL guarantee.
+    virtual bool persists_records() const { return true; }
 };
 
 struct EngineConfig {
@@ -68,7 +71,11 @@ struct ShardStats {
     std::uint64_t rejected_records = 0;
     std::uint64_t dedup_dropped = 0;
     std::uint64_t sealed_slices = 0;
-    std::uint64_t durable_records = 0;
+    std::uint64_t published_records = 0;       // successful publish input, before claim filtering
+    std::uint64_t committed_input_records = 0; // successful persistent-store input (includes duplicates)
+    std::uint64_t inserted_unique_records = 0; // persistent store's actual new-row count
+    std::uint64_t sink_consumed_records = 0;   // successful nonpersistent/Null-store input
+    std::uint64_t durable_records = 0;         // legacy alias of committed_input_records, not a sync guarantee
     std::uint64_t publish_only_records = 0;
     std::uint64_t skipped_records = 0;
     std::uint64_t degraded_records = 0;
@@ -85,7 +92,11 @@ struct EngineStats {
     std::uint64_t rejected_records = 0;
     std::uint64_t dedup_dropped = 0;
     std::uint64_t sealed_slices = 0;
-    std::uint64_t durable_records = 0;
+    std::uint64_t published_records = 0;       // successful publish input, before claim filtering
+    std::uint64_t committed_input_records = 0; // successful persistent-store input (includes duplicates)
+    std::uint64_t inserted_unique_records = 0; // persistent store's actual new-row count
+    std::uint64_t sink_consumed_records = 0;   // successful nonpersistent/Null-store input
+    std::uint64_t durable_records = 0;         // legacy alias of committed_input_records, not a sync guarantee
     std::uint64_t publish_only_records = 0;
     std::uint64_t skipped_records = 0;
     std::uint64_t degraded_records = 0;
@@ -98,9 +109,15 @@ struct EngineStats {
 };
 
 struct DrainReport {
-    bool complete = false;
+    bool complete = false;          // legacy alias of queue_complete, NOT storage completion
+    bool queue_complete = false;    // includes drained staging; finish may still be pending
+    bool storage_complete = false;  // all forwarded input committed by persistent shards
     std::uint64_t pending_records = 0;
-    std::uint64_t durable_records = 0;
+    std::uint64_t published_records = 0;       // successful publish input, before claim filtering
+    std::uint64_t committed_input_records = 0; // successful persistent-store input (includes duplicates)
+    std::uint64_t inserted_unique_records = 0; // persistent store's actual new-row count
+    std::uint64_t sink_consumed_records = 0;   // successful nonpersistent/Null-store input
+    std::uint64_t durable_records = 0;         // legacy alias of committed_input_records, not a sync guarantee
     std::uint64_t degraded_records = 0;
     std::uint64_t publish_only_records = 0;
 };
@@ -119,10 +136,12 @@ public:
     // 源线程：年龄封口 + 尝试把 sealed_pending 推入 ready 队列。每个 poll 轮次调用。
     void tick(std::uint64_t now_ms);
 
-    // 源线程：等待已封口切片全部完成（不含未封口 staging）；不停止引擎。
+    // 源线程：只等已封口队列完成（不含 staging），不证明已存储：publish-only、
+    // Null sink、skipped、degraded 都可能完成队列。完整存储状态见 drain 报告。
     bool wait_idle(std::chrono::milliseconds timeout);
 
-    // 源线程：封口全部 staging，等待在飞完成；超时则停止并报告未完成。
+    // 源线程：封口 staging，限时等待；超时唤醒退避并放弃尚未启动的队列 I/O。
+    // 已进入 adapter 的阻塞 I/O 无法被此 deadline 打断；join 仍会等待它返回。
     DrainReport drain(std::chrono::milliseconds timeout);
 
     // 幂等停止（析构会调用）；等价于 drain(shutdown_ms)。
@@ -140,6 +159,8 @@ private:
     void complete(Shard& shard, const SlicePtr& slice);
     bool can_accept(const Shard& shard) const;
     void observe_queue_peak(Shard& shard);
+    bool retry_wait(std::uint64_t delay_ms);
+    DrainReport drain_report() const;
 
     EngineConfig config_;
     std::vector<std::unique_ptr<RedisShard>> redis_;

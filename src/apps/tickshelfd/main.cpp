@@ -55,6 +55,12 @@ constexpr std::uint64_t kSessionReadBudgetBytes = 1 << 20;  // 1MB，64KB 的整
 // Engine 背压：submit 拒绝的尾部留在 retry buffer；超过上限就不再 poll 会话
 // （数据留内核，TCP 窗口反压 driver），等 worker 排空后恢复读取。
 constexpr std::size_t kMaxEngineRetryTicks = 65536;
+constexpr std::size_t kRecvBytes = 65536;
+// A recv can finish the parser's buffered maximum frame and emit more frames.
+// Reserve the entire conservative upper bound BEFORE reading any socket.
+constexpr std::size_t kMaxTicksPerRecv = tickshelf::kMaxFrameTicks +
+                                        kRecvBytes / tickshelf::kTickBytes + 1;
+static_assert(kMaxEngineRetryTicks >= kMaxTicksPerRecv);
 
 // ConnSession（ADR-011 传输层）：每 TCP 连接一个——字节缓冲在内核，
 // 帧状态机随连接生死；与 Ingestor（数据层，随 symbol/交易日生死）分离。
@@ -119,9 +125,10 @@ public:
 
         while (!g_stop) {
             const std::uint64_t now = steady_ms();
-            // Engine 背压时不再 poll 会话：数据留内核，避免"可读但故意不读"的忙循环。
-            const bool engine_backpressure =
-                engine_ && retry_ticks_.size() >= kMaxEngineRetryTicks;
+            // Retry the oldest decoded tail before admitting any new socket input.
+            if (engine_) engine_pump(now);
+            // Do not spin polling readable sockets whose older input is blocked.
+            const bool engine_backpressure = engine_ && !engine_can_read();
             pfds.clear();
             pfds.push_back({listen_fd_.get(), POLLIN, 0});
             if (!engine_backpressure)
@@ -167,7 +174,7 @@ public:
             }
             // 负载暴露（ADR-013）：观测用，发布失败静默
             if (now2 >= next_publish) {
-                char body[512];
+                char body[2048];
                 const std::uint64_t stall_avg =
                     stats_.stall_count ? stats_.stall_sum_ms / stats_.stall_count : 0;
                 const tickshelf::EngineStats engine_stats =
@@ -175,7 +182,7 @@ public:
                 const std::uint64_t pending =
                     engine_ ? engine_stats.pending_records : ingestor_.pending_ticks();
                 const std::uint64_t rows =
-                    engine_ ? engine_stats.durable_records : stats_.rows_upserted;
+                    engine_ ? engine_stats.inserted_unique_records : stats_.rows_upserted;
                 std::snprintf(body, sizeof(body),
                               "persist=%s;engine=%s;ingested=%llu;pending=%llu;flushes=%llu;"
                               "flush_err=%llu;rows=%llu;stall_avg=%llu;stall_max=%llu",
@@ -188,12 +195,13 @@ public:
                               static_cast<unsigned long long>(stall_avg),
                               static_cast<unsigned long long>(stats_.stall_max_ms));
                 if (engine_) {
-                    char extra[256];
+                    char extra[1536];
                     std::snprintf(extra, sizeof(extra),
                                   ";e_submitted=%llu;e_accepted=%llu;e_rejected=%llu;"
                                   "e_dedup=%llu;e_durable=%llu;e_publish=%llu;e_degraded=%llu;"
                                   "e_retries=%llu;e_finish_pending=%llu;e_pending=%llu;"
-                                  "e_queue=%llu;retry_buf=%zu",
+                                  "e_queue=%llu;retry_buf=%zu;e_published=%llu;"
+                                  "e_committed_input=%llu;e_inserted_unique=%llu;e_sink_consumed=%llu",
                                   static_cast<unsigned long long>(engine_stats.submitted_records),
                                   static_cast<unsigned long long>(engine_stats.accepted_records),
                                   static_cast<unsigned long long>(engine_stats.rejected_records),
@@ -207,7 +215,11 @@ public:
                                       engine_stats.finish_pending_records),
                                   static_cast<unsigned long long>(engine_stats.pending_records),
                                   static_cast<unsigned long long>(engine_stats.queue_depth),
-                                  retry_ticks_.size());
+                                  retry_ticks_.size(),
+                                  static_cast<unsigned long long>(engine_stats.published_records),
+                                  static_cast<unsigned long long>(engine_stats.committed_input_records),
+                                  static_cast<unsigned long long>(engine_stats.inserted_unique_records),
+                                  static_cast<unsigned long long>(engine_stats.sink_consumed_records));
                     std::strncat(body, extra, sizeof(body) - std::strlen(body) - 1);
                 }
                 if (!rc_.connected()) rc_.connect(opt_.redis_host, opt_.redis_port);
@@ -230,9 +242,10 @@ public:
                 deadline - std::chrono::steady_clock::now());
             const auto report = engine_->drain(
                 remaining.count() > 0 ? remaining : std::chrono::milliseconds(0));
-            if (!report.complete)
+            if (!report.queue_complete || !retry_ticks_.empty() ||
+                (opt_.persist == "sqlite" && !report.storage_complete))
                 std::fprintf(stderr,
-                             "tickshelfd: engine drain incomplete pending=%llu durable=%llu "
+                             "tickshelfd: WARNING engine drain incomplete pending=%llu committed_input=%llu "
                              "degraded=%llu retry_buf=%zu\n",
                              static_cast<unsigned long long>(report.pending_records),
                              static_cast<unsigned long long>(report.durable_records),
@@ -315,12 +328,20 @@ private:
         }
     }
 
+    bool engine_can_read() const {
+        return retry_ticks_.empty() &&
+               kMaxEngineRetryTicks - retry_ticks_.size() >= kMaxTicksPerRecv;
+    }
+
     void read_session(ConnSession& s, std::uint64_t now, std::vector<tickshelf::Tick>& ticks) {
         if (s.dead) return;
-        if (engine_ && retry_ticks_.size() >= kMaxEngineRetryTicks) return;  // TCP 背压
-        std::uint8_t buf[65536];
+        std::uint8_t buf[kRecvBytes];
         std::uint64_t budget = kSessionReadBudgetBytes;
         for (;;) {
+            if (engine_) {
+                engine_pump(now);
+                if (!engine_can_read()) return; // old tail first, reserve one recv's maximum output
+            }
             const ssize_t n = ::recv(s.fd.get(), buf, sizeof(buf), 0);
             if (n > 0) {
                 ticks.clear();
@@ -332,6 +353,13 @@ private:
                     return;
                 }
                 if (engine_) {
+                    // Parser's length bound plus the pre-recv reservation makes this strict.
+                    if (ticks.size() > kMaxTicksPerRecv) {
+                        std::fprintf(stderr, "tickshelfd: parser output exceeded recv reservation\n");
+                        s.dead = true;
+                        g_stop = 1;
+                        return;
+                    }
                     const std::size_t accepted = engine_->submit(ticks, now);
                     stats_.ticks_ingested += accepted;
                     for (std::size_t i = accepted; i < ticks.size(); ++i)
@@ -458,7 +486,7 @@ private:
                          "rejected=%llu dedup=%llu durable=%llu publish=%llu skipped=%llu "
                          "degraded=%llu pending=%llu retries=%llu finish_pending=%llu "
                          "queue=%llu/%llu retry_buf=%zu frames=%llu crc_err=%llu resync=%llu "
-                         "conns=%zu\n",
+                         "conns=%zu published=%llu committed_input=%llu inserted_unique=%llu sink_consumed=%llu\n",
                          static_cast<unsigned long long>(stats_.ticks_ingested),
                          static_cast<unsigned long long>(es.submitted_records),
                          static_cast<unsigned long long>(es.accepted_records),
@@ -475,7 +503,11 @@ private:
                          static_cast<unsigned long long>(es.queue_peak), retry_ticks_.size(),
                          static_cast<unsigned long long>(stats_.frames_ok),
                          static_cast<unsigned long long>(stats_.crc_errors),
-                         static_cast<unsigned long long>(stats_.resync_events), sessions_.size());
+                         static_cast<unsigned long long>(stats_.resync_events), sessions_.size(),
+                         static_cast<unsigned long long>(es.published_records),
+                         static_cast<unsigned long long>(es.committed_input_records),
+                         static_cast<unsigned long long>(es.inserted_unique_records),
+                         static_cast<unsigned long long>(es.sink_consumed_records));
             return;
         }
         const char* stall = "";

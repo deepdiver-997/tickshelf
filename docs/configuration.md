@@ -29,6 +29,53 @@ For isolated synthetic validation, which creates its **own** Redis instead of
 using the configured external one, see [real-source-sim.md](real-source-sim.md)
 and the measured [three-trial results](ifind-sim-results.md).
 
+## Delivery boundary and read-only Redis runtime evidence
+
+The current delivery contract is
+[`tickshelf-delivery-v1-20261117`](delivery-contract.md): pre-Storage-commit data,
+including accepted/staging/Redis pending, may be permanently lost with **no fixed
+RPO**. Redis is not the recovery authority. No-AOF/no-RDB Redis is permitted.
+Service SQLite retains its existing settings without silent changes; use actual
+connection PRAGMA readback rather than asserting a FULL default. Explicitly FULL
+service deployments must not be downgraded. Benchmark FULL/WAL-sync baselines and
+healthy-run completeness requirements remain unchanged. This adds no startup
+keys or flags and does not reconfigure external Redis.
+
+`--print-config` describes **requested application configuration**, not observed
+Redis persistence/memory settings, and remains network-free. Runners can separately
+call the Python helper in `scripts/stack_runtime.py`:
+
+```python
+from scripts.stack_runtime import redis_runtime_snapshot
+
+# host/port must be the endpoint explicitly declared for this run; no discovery.
+snapshot = redis_runtime_snapshot(
+    host, port, ownership="owned_private",  # use "external" for non-owned Redis
+    requested={"appendonly": "no", "save": ""},  # intent only, if actually requested
+)
+```
+
+`connection_factory(host, port, timeout=...)` may optionally provide a
+context-managed authenticated connection or fake; otherwise the existing
+`RedisConnection` is used. Ownership is a caller assertion, not inferred from a
+loopback host/port. The helper has no default endpoint and sends only individual
+`CONFIG GET appendonly/save/appendfsync/maxmemory/maxmemory-policy` reads and
+`INFO server/persistence/memory`. It does not send CONFIG SET/REWRITE, SAVE/BGSAVE,
+FLUSH, or SHUTDOWN and does not change the private Redis launch parameters.
+
+Schema version 1 records `endpoint`, `ownership`, `requested`, UTC
+`observed_at`/`completed_at`, and `observed.config`/`observed.info`, plus observed
+server version/PID. Per-item statuses are `observed|unknown|denied|error`;
+top-level status is `observed|partial|denied|error`. Denied/absent/error values are
+not replaced with defaults or intent. With `appendonly=no`, the observed
+`appendfsync_activity` is `inactive` even if `appendfsync=everysec` is configured.
+These are sequential observations, not an atomic snapshot or durability proof.
+
+Fake-only checks (no build/network) are `python3 scripts/test_redis_snapshot.py`;
+`--private-redis` additionally starts and observes a newly owned private Redis
+when the existing `redis-server` binary is available. Neither mode uses shared
+Redis or downloads dependencies.
+
 ## Loading and precedence
 
 ```sh

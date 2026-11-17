@@ -2,6 +2,19 @@
 
 全小端。帧 = 帧头(20B) + N × Tick(64B)。**本文件是官方接入契约（ADR-009），实现中发现的坑直接改这里并升 v 号。**
 
+## 摄入完成与故障边界（不改变线格式）
+
+交付/耐久合同为 [`tickshelf-delivery-v1-20261117`](delivery-contract.md)。当前 TTAP
+**没有摄入 ACK**；`sendall` 成功、心跳、连接关闭或查询响应均不代表某条记录已落库，
+也没有上游持久日志/offset/保证重放契约。重连不是旧帧必然重发。
+
+`accepted`（进程接收）≠ `published`（Redis 发布）≠ `storage_committed`（最终 Storage
+按实际 backend/sync 成功提交）。最终提交前，在途、内存 staging 与 Redis pending 都可能
+永久丢失，**没有固定 RPO**；Redis 不是恢复权威，允许无 AOF/RDB。批 id、租约和唯一键只
+支持缓存副本仍完整存在时的重试/幂等效果，不能复原已丢字节。查询回补实验也不构成通用上游
+replay 保证。服务 SQLite 保持现有设置，以实际连接 PRAGMA 回读解释，不断言默认 FULL；
+显式 FULL 部署不得降级。Benchmark 的 FULL/WAL sync 基线及零意外丢失要求不变。
+
 ## 帧头（20 字节）
 
 | 偏移 | 字段 | 类型 | 说明 |

@@ -2,6 +2,11 @@
 
 > 本文是 M1 实现后的**实然架构**描述（as-built），与设计取利的差异看 design.md 的 ADR。
 > 线格式与键空间见 protocol.md；里程碑划分见 roadmap.md。
+> 当前交付/耐久边界以 [`tickshelf-delivery-v1-20261117`](delivery-contract.md) 为准：
+> 最终 Storage 提交前允许永久 loss，没有固定 RPO；Redis（可无 AOF/RDB）不是恢复权威。
+> `accepted` ≠ `published` ≠ `storage_committed`；TTAP 无摄入 ACK，不承诺上游 replay。
+> 服务 SQLite 保持现有设置，以实际连接 PRAGMA 回读解释，不断言默认 FULL；显式 FULL 部署不得降级。
+> Benchmark 的 FULL/WAL sync 基线不降低；健康 benchmark 仍不得意外丢数据。
 
 ## 组件与进程边界
 
@@ -19,8 +24,9 @@ feedgen / driver.py ──TCP·TTAP帧──▶ tickshelfd ──RESP pipeline�
                      └────────────────────┘
 ```
 
-- **tickshelfd**：单线程守护进程，自己管理网络 poll（ADR-011 时间片循环）。无状态：
-  所有真状态要么在 Redis（攒批产物），要么随连接死亡（半包缓冲）。崩溃即重启。
+- **tickshelfd**：默认单线程守护进程，自己管理网络 poll（ADR-011 时间片循环）。
+  半包、内存桶及可选 Engine staging/队列都是易失状态；Redis 攒批产物也是缓存。
+  进程可重启，但不能由此推出未提交数据可恢复。
 - **persister**：单线程落盘进程。只通过 Redis 键空间与 tickshelfd 的产物交互，
   两个进程互相不知道对方存在——Redis 是它们之间唯一的契约。
 - **libtickshelf**：核心库，tickshelfd 与 persister 都只是薄入口（`main.cpp` 各 ~200 行），
@@ -75,7 +81,8 @@ Ingestor.drain() ──▶ vector<Batch>{symbol, yyyymmdd, first_ts, last_ts, ti
   ZADD **之后**落地（否则 persister 会读到半批）；写穿的认领块必须在 state **之前**
   （否则 persister 在 daemon 落库期间抢走批，重复劳动）。
 - **flush 失败（Redis 写不进/回复 Error）→ 批重投回 Ingestor**，下轮重试。
-  这是 at-least-once：重复段 SET/idx ZADD 无害——段与批 1:1 原地覆盖，索引重复添加幂等。
+  这是存活进程/批副本上的 at-least-once 尝试，不是端到端交付保证：重复段 SET/idx ZADD
+  无害——段与批 1:1 原地覆盖，索引重复添加幂等；副本全丢时无法重试。
 - 不 drain 就不发：Redis 不可达时数据留在内存桶里，内核 TCP 窗口反压 driver（ADR-011 背压）。
 - 两种模式性能对比见 `scripts/bench_compare.sh` 与 ADR-012 实测段。
 
@@ -90,31 +97,33 @@ poll_once():
        │ 段 = 本批 tick 全体（1:1），无邻批重叠脏读；幂等兜底保留
        ▼
        SQLite INSERT OR IGNORE ... WITHOUT ROWID PK(symbol, ts_exchange_ms)
-       │ 重复 upsert 不产生第二行 —— at-least-once + 唯一键 = 效果上的 exactly-once
+       │ 存活批的重复 upsert 不产生第二行 —— 仅 Storage 幂等效果，不是端到端 exactly-once
        ▼
        pipeline② [ HSET state 批id done    ← 无条件 HSET，与 M2 淘汰无竞态
                  , DEL lease:{id} ]       ← 崩在中间：lease 靠 TTL 兜底，state 已 done 不重做
 ```
 
-- **正确性不依赖租约**：租约只减少重复劳动。租约过期双活、worker 崩溃后重做，
-  代价都只是多写一次相同的行（被唯一键吃掉）。
+- **幂等正确性不依赖租约**：租约只减少重复劳动。在完整段与可发现 pending 状态仍存活时，
+  租约过期双活、worker 崩溃后可重做，相同行被唯一键吃掉；租约不能恢复丢失的 Redis 副本。
 - M1 简化：批级处理（500ms 窗口的批 <1s 完成），不做分块续期（ADR-002 的批量续期留给大批场景）。
 
 ## 崩溃窗口与恢复
 
 | 崩溃点 | 丢什么 | 谁恢复 | 语义 |
 |---|---|---|---|
-| feedgen → tickshelfd 在途 | TCP 断连丢在途帧 | feedgen 重连，新帧继续（不重发旧帧） | M1 口径：计为丢失上界（crash_drill MISSING 的来源） |
-| tickshelfd 进程 | 已 ingest 未 flush 的内存桶 | **丢**（这就是 500ms×速率 的窗口） | 同上计入 MISSING；重启后从新连接继续 |
-| classic flush pipeline 中途 | 部分命令已执行 | daemon 重投整批 | 段原地覆盖幂等 + state 重复 HSET 无害 |
-| 写穿 pipeline 中途 | lease/state 已落地、ZADD 残缺 | 租约 TTL 过期 → persister 接手读回 | 崩溃恢复走路径③，语义不变 |
-| 写穿 SQLite upsert 中途 | 无（事务回滚） | daemon release_claims 或租约 TTL → persister | 行要么全在要么不在 |
-| Redis 进程 | 缓冲内未落库数据 | M1 不演练（AOF 收窄窗口，M4 对账兜底） | 排除在 drill 口径外 |
-| persister 进程 | 什么都不丢 | lease TTL 过期 → 重认领；或另一实例接手 | 重做被唯一键吃掉 |
-| upsert 后、标记 done 前 | 无 | state 仍 pending → 重做一遍 | 幂等，行数不变 |
+| feedgen → tickshelfd 在途 | TCP 断连可能丢在途帧 | feedgen 重连，新帧继续（不保证重发旧帧） | TTAP 无摄入 ACK，无上游 replay 保证 |
+| tickshelfd / Engine 进程 | 内存桶、accepted/staging、队列/retry/in-flight 中未提交数据 | 副本全丢则永久丢失 | 不是固定 500ms×速率 窗口，没有固定 RPO |
+| classic flush pipeline 中途 | 部分命令已执行，整批未必可发现/可读 | daemon 及其完整批仍活着才可重投；否则可能丢 | 重复 SET/ZADD/HSET 幂等不等于 pipeline 原子 |
+| 写穿 pipeline 中途 | lease、段、索引、state 可能只发布了一部分 | 仅完整、可发现缓存批可在 TTL 后被 persister 接手 | 缺段/缺状态不承诺可恢复 |
+| 写穿 SQLite upsert 中途 | 未提交事务可回滚 | 完整缓存副本仍在才可 release/TTL 后读回 | 回滚本身不重建输入；可永久丢失 |
+| Redis 进程/缓存丢失 | 未提交的 Redis pending 与发现元数据 | 无持久恢复权威；其他完整副本若存在才有机会重试 | 允许 no-AOF/no-RDB，无固定 RPO |
+| persister 进程 | 其本地未提交副本 | 完整段与 pending 状态仍在才可 TTL 后重认领 | 条件式 at-least-once 尝试，唯一键收敛 |
+| Storage 成功后、标记 done 前 | 已提交数据强度依 backend/sync | 缓存 pending 若还在可重做；否则查 Storage | Storage 幂等效果，不是端到端 exactly-once |
 
-对账口径：`SENT(发送) ≥ ingested(已解析入桶) ≥ SQLite rows`，差值全部可归因到上表。
-crash_drill.sh 的三层断言就是这个不等式 + `rows ≤ SENT` + `重复=0`。
+旧 drill 的 `SENT ≥ ingested ≥ SQLite rows`、`rows ≤ SENT` 与 `重复=0` 是计数诊断，
+不是健康运行允许缺数据的 PASS 条件，也不能证明内容完整。健康 benchmark 仍须按独立输入
+oracle 对最终 Storage 检查零意外 missing、重复及内容错误；故障 drill 则明确报告实际
+loss 与条件恢复范围，不能用本合同把健康丢失豁免为 PASS。
 
 ## 淘汰路径（M2 evictor，独立进程）
 
@@ -164,8 +173,9 @@ read_session → Engine::submit
 
 - 每分片一条 Redis 连接 + 一个 SQLite 文件；文件布局/路由与 `ShardedTickStore`
   完全一致，persister/queryd 继续读写同一批分片。
-- 失败：发布失败退避重试；存储失败释放自己的租约并降级给 persister；finish
-  失败计 `finish_pending`（数据已耐久）；drain 超时如实报告未完成。
+- 失败：发布失败在进程/完整 Slice 仍存活时退避重试；存储失败释放自己的租约，
+  仅缓存完整且可发现时可由 persister 补偿；finish 失败计 `finish_pending`（Storage 已成功，
+  强度依实际 backend/sync）；drain 超时如实报告未完成，不承诺这些条目可恢复。
 - 背压：每分片 pending 上限；`submit` 只接前缀，尾部进有界 retry buffer；
   buffer 满则停止 poll 会话（TCP 反压）。每 ≤100ms 的 `engine_pump` 做年龄封口
   与重投。
@@ -183,6 +193,12 @@ stats:tickshelfd  persist=sqlite;engine=on;ingested=...;pending=...;...
                   e_finish_pending=...;e_pending=...;e_queue=...;retry_buf=...
 stats:persister   worker=...;backlog=...;claimed=...;skipped=...;rows=...;total=...
 ```
+
+`e_accepted` 是进程内接收，`e_publish` 是 Redis 发布；包括 `e_durable` 在内的旧计数
+必须结合 publish-only/write-through 模式解释，不能因名字含 durable 就视为
+`storage_committed` 或 TTAP ACK。运行态配置另由 `scripts/stack_runtime.py` 的只读
+`redis_runtime_snapshot` 记录逐项 CONFIG/INFO、时间、版本/PID、ownership 与
+requested/observed；ACL/未知/错误显式保留，`--print-config` 仍不连网络。
 
 `redis-cli GET stats:persister` 随时可看。只做观测不做控制：写穿/经典的在线切换
 有备案的策略草图（写穿常态、降级信号 = daemon flush 死线连续失约），重访触发条件

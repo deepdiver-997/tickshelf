@@ -1,18 +1,23 @@
 # 设计决定记录（ADR）
 
 > 纪律：每个决定写 背景 / 决定 / 代价。通用模式的自学实现，取舍自己做、自己记、可推翻（推翻时追加新 ADR 并标注旧 ADR 状态）。
+> 当前交付/耐久合同为 [`tickshelf-delivery-v1-20261117`](delivery-contract.md)（ADR-024）。
+> 旧 ADR 中“有界丢失/AOF ~1s/崩溃必补偿/at-least-once + 幂等”等描述不得推导为端到端保证：
+> 最终 Storage 提交前均可能永久 loss、无固定 RPO；pending 恢复须缓存完整副本仍存在。
+> 2026-11-14/15 历史机器证据不改写、不回填本合同或未观测配置。
 
 ## ADR-001 热缓冲用 Redis，不引入消息队列
 
 - **背景**：采集速率与落盘速率解耦需要缓冲。候选：Redis / Kafka / 进程内自研队列。
-- **决定**：Redis，ZSET 承载（score = 行情时间戳，天然支持按时间范围读）。Kafka 的价值在语义（持久化、回放、消费组），本项目单消费者、允许有界的丢失窗口（对账兜底），引入 broker 是过度设计；进程内队列则把崩溃窗口留在进程里，且没有"按时间读"的能力。
-- **代价**：Redis 崩溃丢缓冲内数据 → AOF everysec 收窄窗口到 ~1s 已确认写入，剩余窗口靠对账补数兜底（M4）。队列的正确认知：价值在语义不在容量，Redis 本身就在扮演队列。
+- **决定**：Redis，初版 ZSET 承载（score = 行情时间戳，天然支持按时间范围读；现段式见 ADR-017）。Kafka 的价值在语义（持久化、回放、消费组），本项目不建立持久日志/上游 replay 契约，允许最终 Storage 提交前永久丢失，引入 broker 不是当前目标；进程内队列仍是易失缓冲，且没有“按时间读”的能力。
+- **代价【ADR-024 修订】**：Redis 不是恢复权威，允许 no-AOF/no-RDB；进程内/Redis pending 丢失没有固定 RPO，AOF everysec 也不能把端到端窗口证明为 ~1s。对账能发现缺失但不保证有源可补。队列的价值在语义不在容量，Redis 此处只是缓冲队列，不是持久提交日志。
 
 ## ADR-002 租约协议：claim 是唯一仲裁点，正确性由幂等兜底
 
 - **背景**：多 persister 实例消费同一缓冲，不能重复劳动，也不能因进程崩溃丢活。
 - **决定**：认领 = `SET lease:{批id} {worker} NX EX {ttl}`（原子性来自 Redis 单线程命令语义——查候选批可以读到脏数据，claim 才是仲裁点）。落库幂等：UNIQUE(symbol, ts_exchange) + `INSERT OR IGNORE`。状态用**独立标记键** `state:{批id}`，不嵌进行情数据，写完无条件 SET，与淘汰无竞态。核心认知：**正确性不依赖租约**——at-least-once + 幂等 = 效果上的 exactly-once，租约只是减少重复劳动的效率优化，TTL 判错（过期双做、崩溃后重做）代价只是多写一次。批量场景用分块 + 续期（worker 周期性 EXPIRE），不做动态估时。
 - **代价**：租约过期但进程还活着的双活窗口 → 幂等兜底；标记 SET 落空（数据已被淘汰）无害。
+- **边界【ADR-024】**：上述 at-least-once 仅指完整缓存批仍存在时的重试尝试；effectively exactly-once 仅指唯一键下的 Storage 幂等效果。丢失段/发现状态或全部易失副本后，不保证重做，更不是 TTAP 到 Storage 的端到端 exactly-once。
 
 ## ADR-003 批次按固定时间间隔，不按固定条数
 
@@ -90,7 +95,7 @@
   3. **读回不是浪费，是消费契约**：任何语言/进程只凭 Redis 键空间就能落库，这是 at-least-once + 多实例消费 + 崩溃隔离的来源（ADR-001/002/009）。localhost 下实测代价：10min 演练 216 万 tick 双向 ≈ 460KB/s，RTT ~50µs——当前规模不构成瓶颈。
 - **决定（2026-11-08 修订：双实现共存，A/B 实测后异步仍 deferred）**：评审意见指出单写者只是 SQLite 的限制（PG/ClickHouse 无此约束，ADR-005 本就排期后置）且两条路径应可对比。采纳为**同一租约协议下的双实现**，不是两套系统：
   1. **写穿（`--persist sqlite`）**：flush pipeline 顺序改为 **lease→state→ZADD**——认领先于 state 可见，persister 的既有仲裁（SETNX）天然挡下，零新机制；随后 daemon 内联 SQLite upsert → 批量 [SET done, DEL lease]。SQLite 故障 → release_claims 降级回读回路径。好路径一条 tick 字节只写 Redis **一次**（ZADD），状态收尾是每批一条 SET（比预想的"写两次"还省）。
-  2. **经典读回（`--persist none`，默认）**：不变。persister 在两种模式下都是**孤儿补偿器**：daemon 崩于写库中途 → 批停在 pending+租约 → TTL 过期 → persister 走读回路径接手——崩溃恢复路径不用重写。
+  2. **经典读回（`--persist none`，默认）**：不变。persister 在两种模式下都是**条件式孤儿补偿器**：daemon 崩于写库中途 → 若完整段与可发现 pending 状态仍在 Redis → TTL 过期后可走读回路径接手。缓存副本丢失不保证恢复（ADR-024），租约本身不恢复字节。
   3. **WAL 化**：SQLite 开 WAL + busy_timeout，"单写者"= 同时单写者（文件锁串行），两进程写频次无争用；多进程同瞬间首开撞 WAL 初始化锁 → open 小退避重试。
   4. **异步/多线程仍 deferred，但这次有数据**：写穿同步内联的实测 stall = **3ms 均值 / 16ms 峰值**（负载 8×500/s），占 500ms flush 间隔的 0.6%/3.2%——触发条件（stall 逼近间隔）远未满足。线程化的两个候选形态记录在案：①SQLite 写移入工作线程 + 主循环收割完成队列（回调改租约标记）；②Redis 客户端并入 poll 循环做多路复用（Redis 慢=反压是正确行为，现在做是负资产，ADR-008 同款逻辑）。
 - **实测（bench_compare.sh，8×500/s × 15s，无注入）**：两模式 SENT==rows 零丢失。Redis 命令 CPU 合计 A≈194ms / B≈169ms；**读回字节的差距才是大头**：A 的 ZRANGEBYSCORE 把 60816×64B ≈ 3.9MB 读回 persister，B 仅 21 批作废读（RTT 合并管道里 SETNX 失败但读已随行——认领失败路径的一次性浪费，约 10KB）。经典模式落库追平 248ms / 写穿 463ms（都在最终 flush+关停语义内，无实质差距）。
@@ -165,7 +170,7 @@
 - **背景**：生产期三类通用课题——①资源/额度配额分级与保底；②有计算成本的处理走旁路（与主管线隔离、独立监控资源占用）；③存储格式迁移"双读 + 旧解析器不马上下线"。本项目刚做过 v1→v2 存储迁移（ADR-017），是 dev 期 flag-day（清库重来），生产期不可用——正好补上"下次怎么迁"的空白。
 - **决定**：
   1. **SQLite 格式版本戳（本次落地）**：`PRAGMA user_version` 盖 `kStoreFormatVersion=1`，打开校验——0（新库/遗留库）盖当前值，**不匹配拒绝打开**。永久层（SQLite 行）格式必须可检测：旧二进制遇新格式库要响亮失败，不能拿旧字段偏移静默误解码。迁移配方 = 经典双读：新旧 reader 并存、按版本分派，旧 reader 保留到旧格式数据清零才退役。
-  2. **Redis 段格式的未来迁移（备案）**：idx ZSET 天然是**迁移账本**——每段必在索引中，`idx:{sym}` 扫描即精确枚举待迁移段，"迁移完成" = 账本扫不到旧格式成员。v3 段若变编码（如压缩），段前缀或 idx member 携带格式号，双读按段分派。热层 flag-day 为什么当初侥幸成立：缓冲窗口小（500ms×速率，最坏丢一窗）；永久层不可侥幸——所以版本戳落在 SQLite 而非 Redis。
+  2. **Redis 段格式的未来迁移（备案）**：idx ZSET 天然是**迁移账本**——每段必在索引中，`idx:{sym}` 扫描即精确枚举待迁移段，"迁移完成" = 账本扫不到旧格式成员。v3 段若变编码（如压缩），段前缀或 idx member 携带格式号，双读按段分派。热层 flag-day 是开发期接受未提交缓存丢失的动作，不是“最坏只丢 500ms 一窗”的保证（ADR-024 无固定 RPO）；永久层仍必须检测格式不匹配——所以版本戳落在 SQLite 而非 Redis。
   3. **TTAP 版本退役策略（备案，protocol.md 已注记）**：当前单版本期 `version≠1` 断连；引入 v2 时 = **双版本解析窗口**——服务端同时解析 1/2（帧头 version 字段即分派点），旧版本在整个弃用窗口内保持可解析（"旧解析器不马上下线"），窗口结束恢复按不匹配断连。
   4. **回补任务的预算/优先级（备案，真源接入期要求）**：当前回补源是自家 ring buffer，零外部成本，无预算可耗；接真实供应商后回补执行器需要——任务优先级（交互查询触发的补缺 > 批量历史拉取）、额度预算（每轮/每分钟令牌）、**保底线**（额度低于阈值只放行高优先级）。与 ADR-004 内存水位同构（保底层 + 余量层），且与渐进收敛天然兼容——回补本就容忍任意慢，降速只是收敛变缓不是失败。
   5. **派生数据走旁路，flush 只内联零成本聚合**：`latest` 投影是"顺手聚合"（零计算成本）所以内联在 flush；任何有计算成本的派生（K 线聚合、指标）必须走独立消费者进程——薄入口 + libtickshelf 纯函数，即 persister/evictor/queryd 同款形态，绝不进 tickshelfd 的时间片。旁路的故障隔离与资源监控复用现成机制（进程边界 + `stats:{component}` 观测面），不需要新增设计——"旁路处理与主管线隔离 + 独立监控"的通用实践，在本项目里的对应物就是组件模型本身。
@@ -219,6 +224,14 @@
 - **背压**：每分片 `pending_records` 上限；`submit` 只接收前缀，被拒尾部进 daemon 的有界 retry buffer；buffer 满则不再 poll 会话（数据留内核，TCP 反压 driver），避免“可读但故意不读”的忙循环。队列满时症状是源端阻塞/拒绝，不是锁竞争——与 ADR-020 附录的预判一致。
 - **代价与实测边界**：真实队列深度出现，`mutex+cv` 的 `notify_one`/谓词循环与 timed wait 需要被 TSan 覆盖；每分片慢存储会反压整个源（有意的背压）。在 Mac 合成 TTAP flood（4 分片、write-through、`floodgen` 4 进程）上，80k/400k/1M offered 两组路径都完整落库，稳态约 7.8万/37.8万/87.0万 行/s（按实际行数完成判定），**Engine 没有可归因的稳态吞吐提升**；旧同步 flush 在该负载下已远超 30k。结论：这次交付的是解耦、可配置与可观测性，不是免费的性能倍数；若目标服务器仍只有 3–5k/s，瓶颈在生产 schema/同步模式/单条 Record 处理，不能靠本引擎自动消除。
 - **验证**：engine 单测覆盖发布/部分认领/存储降级/finish 失败/重试/背压/年龄封口/去重/两分片/drain 超时；私有 Redis 端到端覆盖写穿精确行数与 kill -9 后 persister 补偿；TSan 11 用例 + 端到端通过；ASan/UBSan 全离线 98/34964 通过（并修复了两处既有测试自身的越界：`test_frame_parser` 20B 后写 4B 锚点、`test_resp` 15B 字面量按 17B 构造）。旧路径默认不变，persister/queryd/evictor 不改。
+
+## ADR-024 交付边界与只读运行态证据（2026-11-17）
+
+- **背景**：进程接收、Redis 发布、最终 Storage 提交是不同完成点；旧“500ms 一窗/AOF ~1s/孤儿必补偿”叙述容易把易失缓存误当作恢复权威。不同实验 backend 的同步强度也不能由同一个 durable 计数证明。
+- **决定**：以 [`tickshelf-delivery-v1-20261117`](delivery-contract.md) 版本化交付合同。`accepted` ≠ `published` ≠ `storage_committed`；最终 Storage 提交前在途、内存 staging、队列与 Redis pending 均可能永久丢失，没有固定 RPO。TTAP 当前无摄入 ACK，不虚构上游 durable log/offset/replay。Redis 可 no-AOF/no-RDB，不是恢复权威；经典 pending recovery/Engine 降级仅在完整缓存段与发现状态仍存活时成立。at-least-once 限于该重试域，effectively exactly-once 限于 Storage 唯一键/内容幂等效果。
+- **耐久与验收不降级**：服务 SQLite 保持现有设置，不悄然改动；`SqliteTickStore` 启用 WAL 但未显式设置 synchronous，以实际连接 PRAGMA 回读解释，不断言默认 FULL；显式 FULL 部署不得降级。Benchmark 的 SQLite FULL、RocksDB WAL+sync 或追加文件先同步再同步索引基线不变；强度依实际 backend/sync，不以预提交允许 loss 为借口降级。健康 benchmark 仍须独立对账零意外 missing/重复/内容错误；故障 drill 的允许 loss 必须明确记录，不能冒充健康 PASS。
+- **观测决定**：`scripts/stack_runtime.py` 提供 `redis_runtime_snapshot`，只连显式 host/port，记录 caller-declared `owned_private|external`、requested/observed、UTC 时间、server 版本/PID；逐项 CONFIG GET appendonly/save/appendfsync/maxmemory/maxmemory-policy 与 INFO server/persistence/memory。ACL/缺失/错误为 explicit denied/unknown/error 与 partial 汇总，不猜默认值；no-AOF 下 appendfsync 标 inactive。不改私有启动参数/外部 Redis，不执行 CONFIG SET/REWRITE、SAVE/BGSAVE、FLUSH、SHUTDOWN；不接入无网络的 `--print-config`。
+- **代价与证据边界**：接受预提交永久缺失且不能给定固定损失预算；观测是分时读取而非原子持久性证明。2026-11-14/15 历史报告/机器证据不改写，不回填新合同或未观测设置。synthetic、`production_qualified=false` 和公开字段来源/授权要求保持原意；DCRB 为 `not_adapted`，不新增适配/生产兼容声明。
 
 ## 数据模型（Redis）
 

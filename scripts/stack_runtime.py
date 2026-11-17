@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -114,7 +115,7 @@ def wait_until(predicate, *, timeout=10.0, description="ready", processes=None,
 
 
 class RedisConnection:
-    """Small RESP reader for this harness's PING/INFO/GET observations only."""
+    """Small RESP client; callers must enforce their own command allowlist."""
     def __init__(self, host, port, timeout=1.0):
         self.socket = socket.create_connection((host, port), timeout=timeout)
         self.file = self.socket.makefile("rb")
@@ -171,6 +172,138 @@ class RedisConnection:
 def info_fields(data):
     return dict(line.split(":", 1) for line in data.decode().splitlines()
                 if line and not line.startswith("#") and ":" in line)
+
+
+REDIS_SNAPSHOT_CONFIG_KEYS = ("appendonly", "save", "appendfsync", "maxmemory",
+                              "maxmemory-policy")
+REDIS_SNAPSHOT_INFO_SECTIONS = ("server", "persistence", "memory")
+
+
+def _snapshot_failure(exc):
+    message = str(exc)
+    # ACL/auth rejection is not evidence of any Redis setting or default.
+    words = message.upper().replace(":", " ").split()
+    status = "denied" if any(word in ("NOPERM", "NOAUTH", "WRONGPASS")
+                             for word in words) else "error"
+    return {"status": status, "error": message}
+
+
+def _snapshot_text(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, str):
+        return value
+    raise ValueError("expected Redis text response")
+
+
+def redis_runtime_snapshot(host, port, *, ownership, requested=None, timeout=1.0,
+                           connection_factory=None):
+    """Observe only the caller-declared endpoint, never discover or configure it.
+
+    ownership is a caller assertion: 'owned_private' or 'external', not proof of
+    ownership. requested is optional JSON-safe launch/config intent, not observed
+    state. The factory(host, port, timeout=...) may supply an authenticated or fake
+    context-managed connection implementing command(). No default endpoint, data
+    writes, persistence commands, or --print-config integration are provided.
+
+    Returns JSON-safe evidence with per-item observed/unknown/denied/error status.
+    The sequential reads are a timed observation, not an atomic Redis snapshot or
+    proof of persistence. Missing/denied values are never filled from defaults.
+    """
+    if not isinstance(host, str) or not host.strip():
+        raise ValueError("snapshot requires an explicit nonempty Redis host")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("snapshot requires an explicit Redis port in 1..65535")
+    if ownership not in ("owned_private", "external"):
+        raise ValueError("ownership must be owned_private or external")
+    if not isinstance(timeout, (int, float)) or not 0 < timeout < float("inf"):
+        raise ValueError("snapshot timeout must be positive and finite")
+    result = {
+        "schema_version": 1,
+        "endpoint": {"host": host, "port": port},
+        "ownership": ownership,
+        "requested": dict(requested) if requested is not None else {},
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "observed": {"config": {}, "info": {}},
+    }
+    observed = result["observed"]
+    config, info = observed["config"], observed["info"]
+    errors = (RunError, OSError, ValueError, TypeError)
+    factory = connection_factory if connection_factory is not None else RedisConnection
+    try:
+        with factory(host, port, timeout=timeout) as connection:
+            # Single-key GETs also work on Redis versions before multi-key GET.
+            # Keep this fixed allowlist: no caller-controlled Redis commands.
+            for key in REDIS_SNAPSHOT_CONFIG_KEYS:
+                try:
+                    reply = connection.command("CONFIG", "GET", key)
+                    if reply is None or reply == []:
+                        config[key] = {"status": "unknown", "reason": "CONFIG GET returned no value"}
+                    elif not isinstance(reply, (list, tuple)) or len(reply) != 2:
+                        raise ValueError(f"malformed CONFIG GET response for {key}")
+                    elif _snapshot_text(reply[0]) != key:
+                        raise ValueError(f"unexpected CONFIG GET key for {key}")
+                    else:
+                        config[key] = {"status": "observed", "value": _snapshot_text(reply[1])}
+                except errors as exc:
+                    config[key] = _snapshot_failure(exc)
+            for section in REDIS_SNAPSHOT_INFO_SECTIONS:
+                try:
+                    reply = _snapshot_text(connection.command("INFO", section))
+                    fields = info_fields(reply.encode("utf-8"))
+                    info[section] = ({"status": "observed", "value": fields} if fields else
+                                     {"status": "unknown", "reason": "INFO returned no fields"})
+                except errors as exc:
+                    info[section] = _snapshot_failure(exc)
+    except errors as exc:
+        # Connection/open/close failure must not erase successful observations.
+        result["connection_error"] = _snapshot_failure(exc)
+        for key in REDIS_SNAPSHOT_CONFIG_KEYS:
+            config.setdefault(key, dict(result["connection_error"]))
+        for section in REDIS_SNAPSHOT_INFO_SECTIONS:
+            info.setdefault(section, dict(result["connection_error"]))
+
+    server = info["server"]
+    for key in ("redis_version", "process_id"):
+        if server["status"] != "observed":
+            observed[key] = {"status": server["status"], "reason": "INFO server unavailable"}
+            continue
+        value = server["value"].get(key)
+        if value is None or value == "":
+            observed[key] = {"status": "unknown", "reason": f"INFO server omitted {key}"}
+        elif key == "process_id":
+            try:
+                if int(value) <= 0:
+                    raise ValueError("process_id is not positive")
+                observed[key] = {"status": "observed", "value": int(value)}
+            except ValueError as exc:
+                observed[key] = _snapshot_failure(exc)
+        else:
+            observed[key] = {"status": "observed", "value": value}
+
+    appendonly = config["appendonly"]
+    if appendonly.get("value") in ("no", "yes"):
+        observed["appendfsync_activity"] = {
+            "status": "observed",
+            "value": "inactive" if appendonly["value"] == "no" else "active",
+            "reason": f"appendonly={appendonly['value']}; not a sync-success guarantee",
+        }
+    else:
+        observed["appendfsync_activity"] = {
+            "status": appendonly["status"] if appendonly["status"] != "observed" else "unknown",
+            "reason": "appendonly not observed as yes/no; activity cannot be inferred",
+        }
+    items = [*config.values(), *info.values(), observed["redis_version"],
+             observed["process_id"], observed["appendfsync_activity"]]
+    if "connection_error" in result:
+        items.append(result["connection_error"])
+    statuses = {item["status"] for item in items}
+    result["status"] = ("observed" if statuses == {"observed"} else
+                        "denied" if statuses == {"denied"} else
+                        "error" if "error" in statuses and "observed" not in statuses else
+                        "partial")
+    result["completed_at"] = datetime.now(timezone.utc).isoformat()
+    return result
 
 
 def candidate_ports(count):

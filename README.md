@@ -7,7 +7,7 @@
 行情数据基础设施是量化系统里最经典的"热缓冲 → 耐久存储"形态。本项目用 C++ 把整条管线从零打一遍，学习目标：
 
 - **RESP 协议**：手写 Redis 客户端，理解协议层而不是只会调库
-- **at-least-once + 幂等 = 效果上的 exactly-once**：租约协议、崩溃窗口、幂等 upsert，用 `kill -9` 注入故障来证明
+- **存活缓存上的重试 + 幂等落库**：租约协议、崩溃窗口、幂等 upsert，用 `kill -9` 验证限定恢复域；不承诺端到端 at-least-once/exactly-once
 - **分层存储与水位淘汰**：层间按丢失代价、层内按时间价值
 - **容量模型即代码**：启动时用不等式验证配置，预测/实测对账
 - **接入契约设计**：协议即跨语言接口，进程边界做故障隔离——不做 C ABI 绑定（ADR-009）
@@ -16,6 +16,14 @@
 ## 架构与数据流
 
 实然架构、三条数据路径（摄入/攒批冲刷/租约落盘）、崩溃窗口与恢复语义，见 [docs/architecture.md](docs/architecture.md)；v1 范围与里程碑见 [docs/roadmap.md](docs/roadmap.md)。
+
+**交付/耐久合同 [`tickshelf-delivery-v1-20261117`](docs/delivery-contract.md)**：最终 Storage
+提交前允许永久丢失，在途、accepted、staging、Redis pending 均不耐久，**没有固定 RPO**。
+`accepted` ≠ `published` ≠ `storage_committed`，后者强度取决于实际 backend/sync；TTAP
+当前无摄入 ACK，不承诺上游重放。Redis 可无 AOF/RDB且不是恢复权威；服务 SQLite 保持
+现有设置，以实际连接 PRAGMA 回读解释，不断言默认 FULL；显式 FULL 部署不得降级。
+Benchmark 的 FULL/WAL sync 基线不降低。故障允许 loss 不意味着健康 benchmark 丢数据也能 PASS。
+2026-11-14/15 历史机器证据保持原样，不据此合同回填未观测的配置或宣称重跑。
 
 ```
 driver(任意语言) ──TCP·TTAP──▶ tickshelfd ──RESP──▶ Redis (ZSET, score=行情时间)
@@ -27,7 +35,7 @@ driver(任意语言) ──TCP·TTAP──▶ tickshelfd ──RESP──▶ Red
 
 - **接入契约**：[docs/protocol.md](docs/protocol.md) 的 TTAP 二进制协议是**官方接入接口**——任何能开 TCP 的语言都能喂行情（`examples/driver.py`：~100 行纯 struct 手打包的 Python 驱动即证明）。数据源驱动生产上由接入方自研（协议/账号/限流都是源特定的），本项目只规范"数据进来之后"。
 - **feedgen**：参考驱动（C++），模拟行情源：随机游走 + 开盘/收盘突发；M3 加乱序/重复/断流混沌模式。只用模拟数据——repo 自包含，也回避真实行情数据的授权问题。
-- **tickshelfd**：守护进程。收帧（CRC 校验）→ 核心库 ingest → 按固定时间间隔攒批写 Redis。无状态，崩溃即重启。
+- **tickshelfd**：守护进程。收帧（CRC 校验）→ 核心库 ingest → 按固定时间间隔攒批写 Redis。可重启，但未提交数据不是耐久状态，崩溃可能永久丢失。
 - **libtickshelf**：核心组件库（攒批、RESP 客户端、租约落盘），暴露进程内 ingest API，测试直连不走网络。
 - **persister**：独立进程。租约认领 → 幂等落库 → 改标记。多实例安全。
 - **evictor / SDK / 多源切换**：后续里程碑。
@@ -58,7 +66,9 @@ python3 scripts/run_stack.py --build build --config examples/tickshelf.ini
 ./build/persister --config examples/tickshelf.ini --print-config  # 只校验/打印，不建库
 ```
 
-配置语法、路径与覆盖规则见 [docs/configuration.md](docs/configuration.md)。
+配置语法、路径与覆盖规则见 [docs/configuration.md](docs/configuration.md)。其中只读
+`redis_runtime_snapshot` helper 为显式声明的 Redis host/port 记录 requested/observed、
+ACL/缺失/错误及版本/PID；不修改外部 Redis，且不接入无网络的 `--print-config`。
 可选外部 JSON mock 的私有 Redis 全链演练/压测见 [docs/real-source-sim.md](docs/real-source-sim.md)。
 
 **分片异步持久化引擎（可选，默认关闭；ADR-023）**：
@@ -68,11 +78,13 @@ python3 scripts/run_stack.py --build build --config examples/tickshelf.ini
 # CLI 覆盖示例：--engine --persist sqlite --shards 4 --engine-batch-records 8192
 ```
 
-`--engine off`（默认）保持原同步 flush。写穿/仅发布由 `--persist sqlite|none` 决定；引擎为每分片开一条 Redis 连接和一个 SQLite 分片文件，文件布局/路由与 `ShardedTickStore` 一致，persister/queryd 继续兼容。私有端到端：`python3 scripts/test_engine_runtime.py --build build`；旧/新对比：`python3 scripts/engine_bench.py --build build-release --duration 2 --rate 250000 --senders 4`。实测边界见 [ADR-023](docs/design.md) 与 [引擎实测](docs/engine-refactor-20261115.md)。
+`--engine off`（默认）保持原同步 flush。写穿/仅发布由 `--persist sqlite|none` 决定；引擎为每分片开一条 Redis 连接和一个 SQLite 分片文件，文件布局/路由与 `ShardedTickStore` 一致，persister/queryd 继续兼容。私有端到端：`python3 scripts/test_engine_runtime.py --build build`；旧/新网络对比：`python3 scripts/engine_bench.py --suite network --build build-release --duration 2 --rate 250000 --senders 4 --output /tmp/my-new-engine-network`（新目录）。原生八格用 `--suite native`，见 [消融实验说明](docs/ablation-benchmark.md)。实测边界见 [ADR-023](docs/design.md) 与 [历史引擎实测](docs/engine-refactor-20261115.md)。
 
 **五档 JSON / 变长 Record 性能实验台（可选，非生产 TTAP 接口）**：
 
 **默认输入全部是合成行情，不是真实生产捕获。** `backend=rocksdb` 已将完整记录接入 JSON/TCP/hash/真实 Redis 链路；原文捕获回放、独立对账、来源分级及数据库/syscall 口径见 [全记录基准说明](docs/full-record-benchmark.md)。正确性或合成容量 PASS 不代表生产基准合格。
+
+2026-11-17 的 [原生消融与批量复核报告](docs/ablation-results-20261117.md) 提供 compact SQLite / RocksDB 各32行真值表、真实 Engine 八格、查重诊断及30万条三轮批量对照；开关与复跑命令见 [消融实验说明](docs/ablation-benchmark.md)。短路格不授容量认证，DCRB未适配。
 
 全记录 SQLite/RocksDB 的百万条三轮、SQLite 判重 SQL 优化及 60 秒容量复核见 [全记录实测报告](docs/full-record-results-20261114.md)（[机器证据](docs/full-record-results-20261114.json)）。Mac 全记录 100k 目标仍未达到；下文旧 104,904 条/s 成绩属于“文件＋SQLite 稀疏索引”，不是全记录数据库成绩。
 

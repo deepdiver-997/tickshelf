@@ -1,0 +1,2376 @@
+{
+  "artifact_root": "/tmp/tickshelf-ablation-20261117.UYJcYD",
+  "capacity_certified_by_truth_table": false,
+  "commit_or_push_performed": false,
+  "comparison_evidence": {
+    "path": "ablation-comparisons-20261117.json",
+    "sha256": "36cfcbd046fda2201ae56bf363eac916b201d05303299216bb3d1fb1e4918d38"
+  },
+  "date": "2026-11-17",
+  "dcrb_compatibility": "not-adapted",
+  "delivery_contract": "tickshelf-delivery-v1-20261117",
+  "finite_supply_validation": {
+    "config": {
+      "autocheckpoint": 1000,
+      "backend": "rocksdb",
+      "batch_records": 1024,
+      "dedup_max_entries": 1000000,
+      "depth": 5,
+      "directory": "/tmp/tickshelf-ablation-20261117.UYJcYD/rocks-target-15s-36k/cases/full-r1-0b49310ce9434121a76ba89e4b172192",
+      "duplicate_every": 0,
+      "failpoint": "",
+      "hash": "dedup",
+      "hash_algorithm": "sha256",
+      "hash_batch_records": 1024,
+      "hash_mode": "batch",
+      "host": "127.0.0.1",
+      "input": "json",
+      "input_file": "/private/tmp/tickshelf-ablation-20261117.UYJcYD/rocks-target-15s-36k/inputs/input-855b59fc305b49d48f2c5c65099cebfc.iqb",
+      "input_manifest": "",
+      "optional_fields": false,
+      "output_file": "",
+      "parse": "real",
+      "port": 61130,
+      "rate": 36000,
+      "records": 540000,
+      "redis": "roundtrip",
+      "redis_batch_records": 8192,
+      "redis_host": "127.0.0.1",
+      "redis_port": 61129,
+      "reuse_statement": true,
+      "seed": 42,
+      "sqlite_compact_lookup": "subquery",
+      "sqlite_fullfsync": "on",
+      "store_lookup": "exact",
+      "symbols": 5400,
+      "synchronous": "FULL",
+      "timeout_s": 120,
+      "transaction_bytes": 4194304,
+      "transaction_model": "light",
+      "transaction_ms": 100,
+      "transaction_rows": 8192
+    },
+    "correctness": {
+      "ack_durable": true,
+      "checksum_fnv1a64": "cb3542328c8fe6f2",
+      "counters": {
+        "committed_attempts": 540000,
+        "dedup_dropped": 0,
+        "forwarded": 540000,
+        "parsed": 540000,
+        "received": 540000,
+        "sink_consumed": 0,
+        "source_generated": 540000,
+        "source_sent": 540000
+      },
+      "expected_unique": 540000,
+      "passed": true
+    },
+    "input": {
+      "bytes": 242202075,
+      "canonical_bytes": 157140000,
+      "checksum_all": "cb3542328c8fe6f2",
+      "checksum_unique": "cb3542328c8fe6f2",
+      "coverage": {
+        "all_records_full_five_level_baseline": true,
+        "full_five_level_baseline_records": 540000,
+        "observed_symbols": 5400,
+        "records": 540000
+      },
+      "generator": "independent-python-record.hpp-formula",
+      "input": "json",
+      "path": "/private/tmp/tickshelf-ablation-20261117.UYJcYD/rocks-target-15s-36k/inputs/input-855b59fc305b49d48f2c5c65099cebfc.iqb",
+      "raw_payload_bytes": 242189379,
+      "records": 540000,
+      "sha256": "2e9e6706a9212434adcd63e6caabe79dc49ff0f211392659057664b82129dffe",
+      "source": {
+        "authorized": false,
+        "kind": "synthetic",
+        "provenance": "deterministic record.hpp formula, not production capture"
+      },
+      "source_mode": "file_replay",
+      "unique_records": 540000
+    },
+    "oracle": {
+      "actual_unique": 540000,
+      "expected_unique": 540000,
+      "first_time": 1700000000000,
+      "last_time": 1700000099000,
+      "method": "full-unique-canonical-blob-set-equality",
+      "passed": true,
+      "physical_duplicates": 0,
+      "physical_rows": 540000
+    },
+    "performance": {
+      "ack_tail_after_send_s": 0.6526657080000007,
+      "actual_source_records_per_s": 36012.82206518946,
+      "backlog": {
+        "gap_slope_records_per_s": 193.42333428913983,
+        "max_receive_commit_gap": 6144,
+        "measurement": "receiver backlog exact at samples; source backlog linearly interpolated by monotonic_ns",
+        "samples": [
+          {
+            "committed_attempts": 0,
+            "elapsed_s": 1.5583e-05,
+            "forwarded": 0,
+            "queue_gap": 0,
+            "receive_commit_gap": 0,
+            "received": 0,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 6.673868396142627,
+            "source_receive_gap_estimated": 6.673868396142627,
+            "source_sent_interpolated": 6.673868396142627
+          },
+          {
+            "committed_attempts": 34816,
+            "elapsed_s": 1.013133333,
+            "forwarded": 34816,
+            "queue_gap": 0,
+            "receive_commit_gap": 0,
+            "received": 34816,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 2020.960623139923,
+            "source_receive_gap_estimated": 2020.960623139923,
+            "source_sent_interpolated": 36836.96062313992
+          },
+          {
+            "committed_attempts": 72704,
+            "elapsed_s": 2.0586975,
+            "forwarded": 72704,
+            "queue_gap": 0,
+            "receive_commit_gap": 0,
+            "received": 72704,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 1302.849528881954,
+            "source_receive_gap_estimated": 1302.849528881954,
+            "source_sent_interpolated": 74006.84952888195
+          },
+          {
+            "committed_attempts": 110592,
+            "elapsed_s": 3.122320291,
+            "forwarded": 110592,
+            "queue_gap": 0,
+            "receive_commit_gap": 0,
+            "received": 110592,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 2127.2117011702358,
+            "source_receive_gap_estimated": 2127.2117011702358,
+            "source_sent_interpolated": 112719.21170117024
+          },
+          {
+            "committed_attempts": 144384,
+            "elapsed_s": 4.126031916,
+            "forwarded": 148480,
+            "queue_gap": 4096,
+            "receive_commit_gap": 4096,
+            "received": 148480,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 4072.4171280784067,
+            "source_receive_gap_estimated": -23.582871921593323,
+            "source_sent_interpolated": 148456.4171280784
+          },
+          {
+            "committed_attempts": 182272,
+            "elapsed_s": 5.128100416,
+            "forwarded": 185344,
+            "queue_gap": 3072,
+            "receive_commit_gap": 3072,
+            "received": 185344,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 2653.4449942900683,
+            "source_receive_gap_estimated": -418.5550057099317,
+            "source_sent_interpolated": 184925.44499429007
+          },
+          {
+            "committed_attempts": 220160,
+            "elapsed_s": 6.144570791,
+            "forwarded": 220160,
+            "queue_gap": 0,
+            "receive_commit_gap": 0,
+            "received": 220160,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 957.835812033707,
+            "source_receive_gap_estimated": 957.835812033707,
+            "source_sent_interpolated": 221117.8358120337
+          },
+          {
+            "committed_attempts": 252928,
+            "elapsed_s": 7.149128,
+            "forwarded": 258048,
+            "queue_gap": 5120,
+            "receive_commit_gap": 5120,
+            "received": 258048,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 4768.164009608416,
+            "source_receive_gap_estimated": -351.83599039158435,
+            "source_sent_interpolated": 257696.16400960842
+          },
+          {
+            "committed_attempts": 291840,
+            "elapsed_s": 8.166604875,
+            "forwarded": 293888,
+            "queue_gap": 2048,
+            "receive_commit_gap": 2048,
+            "received": 293888,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 2100.461683116446,
+            "source_receive_gap_estimated": 52.46168311644578,
+            "source_sent_interpolated": 293940.46168311645
+          },
+          {
+            "committed_attempts": 329728,
+            "elapsed_s": 9.204163416,
+            "forwarded": 329728,
+            "queue_gap": 0,
+            "receive_commit_gap": 0,
+            "received": 329728,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 1960.8972211294458,
+            "source_receive_gap_estimated": 1960.8972211294458,
+            "source_sent_interpolated": 331688.89722112945
+          },
+          {
+            "committed_attempts": 367616,
+            "elapsed_s": 10.260586041,
+            "forwarded": 367616,
+            "queue_gap": 0,
+            "receive_commit_gap": 0,
+            "received": 367616,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 1722.3939813328907,
+            "source_receive_gap_estimated": 1722.3939813328907,
+            "source_sent_interpolated": 369338.3939813329
+          },
+          {
+            "committed_attempts": 401408,
+            "elapsed_s": 11.267448125,
+            "forwarded": 405504,
+            "queue_gap": 4096,
+            "receive_commit_gap": 4096,
+            "received": 405504,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 4503.4330067225965,
+            "source_receive_gap_estimated": 407.4330067225965,
+            "source_sent_interpolated": 405911.4330067226
+          },
+          {
+            "committed_attempts": 436224,
+            "elapsed_s": 12.268927083,
+            "forwarded": 442368,
+            "queue_gap": 6144,
+            "receive_commit_gap": 6144,
+            "received": 442368,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 5402.24246615154,
+            "source_receive_gap_estimated": -741.7575338484603,
+            "source_sent_interpolated": 441626.24246615154
+          },
+          {
+            "committed_attempts": 477184,
+            "elapsed_s": 13.307031583,
+            "forwarded": 477184,
+            "queue_gap": 0,
+            "receive_commit_gap": 0,
+            "received": 477184,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 2117.813487847743,
+            "source_receive_gap_estimated": 2117.813487847743,
+            "source_sent_interpolated": 479301.81348784774
+          },
+          {
+            "committed_attempts": 510976,
+            "elapsed_s": 14.31120525,
+            "forwarded": 515072,
+            "queue_gap": 4096,
+            "receive_commit_gap": 4096,
+            "received": 515072,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 4182.463857851573,
+            "source_receive_gap_estimated": 86.46385785157327,
+            "source_sent_interpolated": 515158.4638578516
+          },
+          {
+            "committed_attempts": 540000,
+            "elapsed_s": 15.644867958,
+            "forwarded": 540000,
+            "queue_gap": 0,
+            "receive_commit_gap": 0,
+            "received": 540000,
+            "sink_consumed": 0,
+            "source_commit_gap_estimated": 0.0,
+            "source_receive_gap_estimated": 0.0,
+            "source_sent_interpolated": 540000.0
+          }
+        ],
+        "sampling_caveat": "periodic samples, not per-record queues; interpolation can yield small negative gaps",
+        "source_aligned_steady_samples": 14,
+        "source_commit_gap_slope_records_per_s": 140.24584014901393,
+        "steady_samples": 14
+      },
+      "canonical_bytes_per_s": 10042611.063965457,
+      "committed_attempts_per_s_including_drain": 34516.11106272527,
+      "completion_denominator_s": 15.647325083,
+      "cpu": {
+        "receiver": {
+          "cpu_cores_over_observed_interval": 0.4095795002691895,
+          "max_rss_kib": 490480,
+          "sample_count": 31
+        },
+        "redis": {
+          "cpu_cores_over_observed_interval": 0.07359631645461998,
+          "max_rss_kib": 36192,
+          "sample_count": 31
+        },
+        "source": {
+          "cpu_cores_over_observed_interval": 0.05567721331784294,
+          "max_rss_kib": 16672,
+          "sample_count": 31
+        }
+      },
+      "dcrb_compatibility": "not-adapted",
+      "dedup_cache": {
+        "dedup_cache_bytes": 235440000,
+        "dedup_entries": 540000,
+        "dedup_evictions": 0,
+        "dedup_payload_bytes": 157140000,
+        "semantics": "bounded FIFO; payload is held once; cache bytes include conservative entry/key/link accounting, not RSS; evictions are not durability failures"
+      },
+      "delivery_contract": "tickshelf-delivery-v1-20261117",
+      "durable_unique_count": 540000,
+      "durable_unique_records_per_s_including_drain": 34516.11106272527,
+      "end_to_end_durable_unique_records_per_s": 34510.690941462046,
+      "end_to_end_input_records_per_s": 34510.690941462046,
+      "full_chain_contract": {
+        "coverage_basis": "independently inspected input records",
+        "dcrb_compatibility": "not-adapted",
+        "delivery_contract": "tickshelf-delivery-v1-20261117",
+        "eligible": true,
+        "record_contract": "experimental-RCD1-v1",
+        "scope": "complete five-level JSON/TCP/SHA/dedup/Redis/FULL under the stated input; no production certification implied",
+        "source": {
+          "authenticity_scope": "file hashes establish integrity, not independent proof of historical source authenticity",
+          "authorization_declared": false,
+          "kind": "synthetic",
+          "production_capture_supplied": false,
+          "production_qualified": false,
+          "production_validation": "not-performed; synthetic or production-shape input is not production capture",
+          "provenance": "deterministic record.hpp formula, not production capture"
+        },
+        "violations": {}
+      },
+      "input_source": {
+        "authenticity_scope": "file hashes establish integrity, not independent proof of historical source authenticity",
+        "authorization_declared": false,
+        "kind": "synthetic",
+        "production_capture_supplied": false,
+        "production_qualified": false,
+        "production_validation": "not-performed; synthetic or production-shape input is not production capture",
+        "provenance": "deterministic record.hpp formula, not production capture"
+      },
+      "measurement_class": "full-path-observation",
+      "minimum_durable_rate_passed": true,
+      "minimum_durable_records_per_s": 30000.0,
+      "notes": [
+        "Receiver rate includes drain and alone never establishes sustainable capacity.",
+        "Progress cannot observe kernel/socket/source queues; timestamps are receiver-relative.",
+        "CPU stage timers measure wall time, not inspected CPU hotspots."
+      ],
+      "offered_records_per_s": 36000,
+      "offered_unique_records_per_s": 36000.0,
+      "physical_rows": 540000,
+      "raw_payload_bytes_per_s": 15478005.199951146,
+      "receiver_records_per_s_including_drain": 34516.11106272527,
+      "source_ack_elapsed_s": 15.647325083,
+      "source_bound_warning": null,
+      "source_offer_ratio": 1.0003561684774849,
+      "source_schedule": {
+        "available": true,
+        "planned_minus_sent_peak": 240,
+        "planned_minus_sent_slope_records_per_s": -0.0016402354839629174,
+        "samples": [
+          [
+            0.001944042,
+            69
+          ],
+          [
+            1.015989167,
+            0
+          ],
+          [
+            2.025091375,
+            199
+          ],
+          [
+            3.035733417,
+            0
+          ],
+          [
+            4.044541917,
+            195
+          ],
+          [
+            5.055527458,
+            0
+          ],
+          [
+            6.064295458,
+            202
+          ],
+          [
+            7.074706,
+            0
+          ],
+          [
+            8.08309375,
+            175
+          ],
+          [
+            9.09331975,
+            0
+          ],
+          [
+            10.103156708,
+            193
+          ],
+          [
+            11.113974,
+            0
+          ],
+          [
+            12.122798208,
+            196
+          ],
+          [
+            13.134369458,
+            0
+          ],
+          [
+            14.142430958,
+            199
+          ],
+          [
+            14.994659667,
+            0
+          ],
+          [
+            15.647325958,
+            0
+          ]
+        ],
+        "scope": "planned source arrivals minus socket-accepted sends; synchronous send intervals are sampled before/after, not per record",
+        "send_complete_lag_max_s": 0.006669695,
+        "send_start_lag_max_s": 0.006585778,
+        "steady_samples": 15
+      },
+      "source_schedule_acceptance": {
+        "max_lag_s": 1.0,
+        "required": true
+      },
+      "source_send_elapsed_s": 14.994659375,
+      "target_acceptance": {
+        "max_ack_tail_s": 1.5,
+        "max_gap_slope_records_per_s": 360.0,
+        "minimum_duration_s": 10,
+        "minimum_offer_ratio": 0.95,
+        "minimum_steady_samples": 3,
+        "scope": "this finite run and hardware only, not an unbounded capacity proof"
+      },
+      "validated_input_unique_count": 540000,
+      "verdict": "pass-full-chain-capacity",
+      "wire_bytes_per_s": 15478816.584640391
+    },
+    "scope": "one local synthetic 15-second offered workload; not long-term or production capacity",
+    "status": "passed",
+    "store": {
+      "backend": "rocksdb",
+      "backend_lookup_metric_scope": "workload only, excluding recovery/export; lookup_calls counts persisted digest-prefix candidate Seeks (one per distinct digest per batch); candidates counts persisted payload rows returned for C++ exact comparison; pending hits are separately counted by rocksdb_dedup_pending_hits",
+      "batch_metadata_rows": 0,
+      "counters": {
+        "attempted": 540000,
+        "ignored": 0,
+        "inserted": 540000,
+        "transactions": 99
+      },
+      "database": "/tmp/tickshelf-ablation-20261117.UYJcYD/rocks-target-15s-36k/cases/full-r1-0b49310ce9434121a76ba89e4b172192/full-record-rocksdb-v1",
+      "deduplication": "nonunique fixed32 SHA-256 prefix candidates, exact full canonical byte equality only; pending batch cache",
+      "digest_cache_contract": "shared store_digest; trusted EncodedRecord SHA256 only while bytes unchanged; test override takes precedence",
+      "durability_scope": "synchronous WAL atomic WriteBatch with OS sync; no physical power-loss or hardware PLP claim",
+      "durable": true,
+      "hardware_plp": "unknown",
+      "heavy_equivalence": "logical per-record time/symbol secondary index and attempted/inserted/ignored/bytes batch metadata; Rocks KV and SQLite B-tree layouts/physical costs are not identical; no segment CRC substitute",
+      "input_validation": "same trusted-codec canonical header/64MiB batch boundary as SQLite; recovery fully decodes all payloads and validates both directions of every index",
+      "payload_location": "RocksDB D values contain complete canonical records; no external segment files",
+      "persisted_count_scope": "strictly verified recovery state plus acknowledged atomic batches; null when poisoned because write status may have an uncertain commit outcome",
+      "persisted_counts": {
+        "attempted": 540000,
+        "canonical_bytes": 157140000,
+        "ignored": 0,
+        "inserted": 540000,
+        "transactions": 99,
+        "unique_payload_bytes": 157140000
+      },
+      "physical_duplicate_rows": 0,
+      "physical_key_rows": 1080002,
+      "physical_power_loss_tested": false,
+      "physical_rows": 540000,
+      "rocksdb": {
+        "api_count_scope": "logical library operations, not syscalls; successful workload batch Put/key/value bytes exclude startup stamp/state; dedup and range iterators reused per operation; recovery has separate Get/iterator counters",
+        "background_state": {
+          "rocksdb.background-errors": 0,
+          "rocksdb.block-cache-capacity": 33554432,
+          "rocksdb.block-cache-pinned-usage": 64,
+          "rocksdb.block-cache-usage": 22649702,
+          "rocksdb.compaction-pending": 0,
+          "rocksdb.cur-size-all-mem-tables": 2048,
+          "rocksdb.estimate-live-data-size": 217556852,
+          "rocksdb.estimate-pending-compaction-bytes": 0,
+          "rocksdb.live-sst-files-size": 217556852,
+          "rocksdb.mem-table-flush-pending": 0,
+          "rocksdb.num-immutable-mem-table": 0,
+          "rocksdb.num-running-compactions": 0,
+          "rocksdb.num-running-flushes": 0,
+          "rocksdb.total-sst-files-size": 217556852
+        },
+        "build_properties": {
+          "rocksdb_build_date": "2026-10-28 15:47:22",
+          "rocksdb_build_git_sha": "17b624b5c0d41bd42db5cf88aa867f3b26eaf1fa",
+          "rocksdb_build_git_tag": "v11.13.2"
+        },
+        "debt_after_flush": {
+          "rocksdb.background-errors": 0,
+          "rocksdb.block-cache-capacity": 33554432,
+          "rocksdb.block-cache-pinned-usage": 15767,
+          "rocksdb.block-cache-usage": 22661160,
+          "rocksdb.compaction-pending": 0,
+          "rocksdb.cur-size-all-mem-tables": 2048,
+          "rocksdb.estimate-live-data-size": 27857197,
+          "rocksdb.estimate-pending-compaction-bytes": 217843062,
+          "rocksdb.live-sst-files-size": 217843062,
+          "rocksdb.mem-table-flush-pending": 0,
+          "rocksdb.num-immutable-mem-table": 0,
+          "rocksdb.num-running-compactions": 1,
+          "rocksdb.num-running-flushes": 1,
+          "rocksdb.total-sst-files-size": 217843062
+        },
+        "debt_after_wait_compact": {
+          "rocksdb.background-errors": 0,
+          "rocksdb.block-cache-capacity": 33554432,
+          "rocksdb.block-cache-pinned-usage": 64,
+          "rocksdb.block-cache-usage": 22649702,
+          "rocksdb.compaction-pending": 0,
+          "rocksdb.cur-size-all-mem-tables": 2048,
+          "rocksdb.estimate-live-data-size": 217556852,
+          "rocksdb.estimate-pending-compaction-bytes": 0,
+          "rocksdb.live-sst-files-size": 217556852,
+          "rocksdb.mem-table-flush-pending": 0,
+          "rocksdb.num-immutable-mem-table": 0,
+          "rocksdb.num-running-compactions": 0,
+          "rocksdb.num-running-flushes": 0,
+          "rocksdb.total-sst-files-size": 217556852
+        },
+        "debt_after_writes": {
+          "rocksdb.background-errors": 0,
+          "rocksdb.block-cache-capacity": 33554432,
+          "rocksdb.block-cache-pinned-usage": 64,
+          "rocksdb.block-cache-usage": 22649254,
+          "rocksdb.compaction-pending": 0,
+          "rocksdb.cur-size-all-mem-tables": 30410752,
+          "rocksdb.estimate-live-data-size": 63602290,
+          "rocksdb.estimate-pending-compaction-bytes": 0,
+          "rocksdb.live-sst-files-size": 189985865,
+          "rocksdb.mem-table-flush-pending": 0,
+          "rocksdb.num-immutable-mem-table": 0,
+          "rocksdb.num-running-compactions": 0,
+          "rocksdb.num-running-flushes": 0,
+          "rocksdb.total-sst-files-size": 189985865
+        },
+        "finish_background_state": {
+          "rocksdb.background-errors": 0,
+          "rocksdb.block-cache-capacity": 33554432,
+          "rocksdb.block-cache-pinned-usage": 64,
+          "rocksdb.block-cache-usage": 22649702,
+          "rocksdb.compaction-pending": 0,
+          "rocksdb.cur-size-all-mem-tables": 2048,
+          "rocksdb.estimate-live-data-size": 217556852,
+          "rocksdb.estimate-pending-compaction-bytes": 0,
+          "rocksdb.live-sst-files-size": 217556852,
+          "rocksdb.mem-table-flush-pending": 0,
+          "rocksdb.num-immutable-mem-table": 0,
+          "rocksdb.num-running-compactions": 0,
+          "rocksdb.num-running-flushes": 0,
+          "rocksdb.total-sst-files-size": 217556852
+        },
+        "finish_called": true,
+        "finish_contract": "Flush(wait), WaitForCompact(flush,wait_for_purge), SyncWAL, Close/delete, read-only reopen all timed inside finish; export does not write or repair",
+        "format_stamp": "tickshelf-bench/full-record-rocksdb/v1/RCD1/light",
+        "logical_api_counts": {
+          "rocksdb_get_calls": 0,
+          "rocksdb_iterator_creations": 99,
+          "rocksdb_put_ops": 1080099,
+          "rocksdb_seek_calls": 540000,
+          "rocksdb_write_batches": 99,
+          "rocksdb_write_calls": 99
+        },
+        "options": {
+          "allow_mmap_writes": false,
+          "block_cache_capacity": 33554432,
+          "block_cache_pinned_usage": 64,
+          "block_cache_usage": 22649702,
+          "block_size": 4096,
+          "bloom_bits_per_key": 10,
+          "bottommost_compression": "none",
+          "compression": "none",
+          "dedup_read_options": {
+            "prefix_same_as_start": true,
+            "total_order_seek": false
+          },
+          "digest_prefix_bytes": 33,
+          "disable_auto_compactions": false,
+          "filter_policy": "bloomfilter",
+          "manual_wal_flush": false,
+          "max_background_jobs": 2,
+          "max_write_buffer_number": 2,
+          "memtable_prefix_bloom_size_ratio": 0,
+          "min_write_buffer_number_to_merge": 1,
+          "no_block_cache": false,
+          "option_policy": "library cache/memtable defaults; explicit sync/checksum/recovery/no-compression plus capped33 prefix and 10-bit/key Bloom; actual memory including Bloom is not claimed equal to SQLite cache budget",
+          "other_read_options": {
+            "prefix_same_as_start": false,
+            "total_order_seek": true
+          },
+          "paranoid_checks": true,
+          "prefix_extractor": "rocksdb.CappedPrefix",
+          "table_factory": "BlockBasedTable",
+          "wal_recovery_mode": "absolute_consistency",
+          "whole_key_filtering": true,
+          "write_buffer_size": 67108864
+        },
+        "poisoned": false,
+        "sync_source": "POSIX use_fsync=true; macOS HAVE_FULLFSYNC builds select fcntl(F_FULLFSYNC), otherwise fsync; build capability is not inferred from use_fsync",
+        "version": "11.13.2",
+        "write_options": {
+          "disableWAL": false,
+          "sync": true,
+          "use_fsync": true
+        }
+      },
+      "schema_cost": "per unique record: D digest/id -> full payload and R symbol/time/id -> digest; one S state replacement per nonempty batch",
+      "store_lookup": "exact",
+      "symbol_index_rows": 540000,
+      "sync_method": "RocksDB WAL sync=true,use_fsync=true",
+      "time_encoding": "uint64 big-endian 8-byte; length-prefixed binary symbols",
+      "time_symbol_index_rows": 0,
+      "transaction_model": "light",
+      "writer_model": "one DB writer handle; mutex covers dedup read through synchronous WriteBatch; DB LOCK rejects independent writers; not TransactionDB or multi-writer transactions"
+    },
+    "summary_path": "/tmp/tickshelf-ablation-20261117.UYJcYD/rocks-target-15s-36k/summary.json",
+    "summary_sha256": "5f9964d0507115d70ad8978a2c22d5c00b10cfddc853c5093f4d7fd913128f22",
+    "target_passed": true
+  },
+  "git_head": "b023b8325676c2df5f3bba0ec97b9b615c3fc30e",
+  "input_source_kind": "synthetic",
+  "known_rejected_attempt": {
+    "path": "/tmp/tickshelf-ablation-20261117.UYJcYD/truth-final-rocks-54k/summary.json",
+    "reason": "SQLite-only sqlite_compact_lookup=separate copied into Rocks config; startup validation rejected before input generation; corrected in new v2 directory",
+    "sha256": "a50b6195338d3010da44a6cef51304694b946d1d53e4b329f48dfcccdc7722ad"
+  },
+  "limitations": [
+    "No DCRB exact encoding, event-identity, parent raw batch or E/Q index adaptation",
+    "No target hardware or production capture validation",
+    "No physical power-loss or hardware PLP testing",
+    "No Linux real syscall trace on macOS",
+    "No long-duration saturation/soak certification",
+    "Batch tuning compares existing transaction row limits 1000 versus 8192 in the same instrumented binary, not a new algorithm versus the prior 8192 implementation"
+  ],
+  "production_qualified": false,
+  "resources": {
+    "artifact_allocated_kib": 9564120,
+    "available_bytes": 229759315968,
+    "historical_artifacts_deleted": false,
+    "new_artifact_budget_bytes": 12884901888,
+    "reserve_free_bytes": 10737418240
+  },
+  "schema_version": 1,
+  "superseded_early_tables": {
+    "paths": [
+      "/tmp/tickshelf-ablation-20261117.UYJcYD/shakedown-compact",
+      "/tmp/tickshelf-ablation-20261117.UYJcYD/truth-compact-54k",
+      "/tmp/tickshelf-ablation-20261117.UYJcYD/truth-rocks-54k"
+    ],
+    "reason": "Older reporting used a non-null durable_unique_count for Null even though durable rate/eligibility were null/false; original artifacts retained, final tables rerun with corrected reporting and stricter work verification"
+  },
+  "theoretical_limit_claimed": false,
+  "truth_tables": {
+    "compact": {
+      "all_24_legal_rows_passed": true,
+      "artifact_directory": "/tmp/tickshelf-ablation-20261117.UYJcYD/truth-final-compact-54k",
+      "binary_sha256": "cfc8786570a9a2d844c7ec7fda595120abe94adb8e1f100b5efb200ce5e3a432",
+      "compile_flags": [
+        "CMAKE_BUILD_TYPE:STRING=Release",
+        "CMAKE_CXX_COMPILER:FILEPATH=/usr/bin/c++",
+        "CMAKE_CXX_FLAGS:STRING=",
+        "CMAKE_CXX_FLAGS_DEBUG:STRING=-g",
+        "CMAKE_CXX_FLAGS_MINSIZEREL:STRING=-Os -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG",
+        "SQLite3_INCLUDE_DIR:PATH=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include",
+        "SQLite3_LIBRARY:FILEPATH=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libsqlite3.tbd",
+        "simdjson_DIR:PATH=/opt/homebrew/lib/cmake/simdjson",
+        "CMAKE_CXX_FLAGS-ADVANCED:INTERNAL=1",
+        "CMAKE_CXX_FLAGS_DEBUG-ADVANCED:INTERNAL=1",
+        "CMAKE_CXX_FLAGS_MINSIZEREL-ADVANCED:INTERNAL=1",
+        "CMAKE_CXX_FLAGS_RELEASE-ADVANCED:INTERNAL=1",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1",
+        "SQLite3_INCLUDE_DIR-ADVANCED:INTERNAL=1",
+        "SQLite3_LIBRARY-ADVANCED:INTERNAL=1"
+      ],
+      "current_cpp_hpp_match_measured_snapshot": true,
+      "environment_sha256": "2b59a4507acc56d42972927bd7659d0db1a76e1966abb01c88f9c8a5cb2a8876",
+      "full_path_performance": {
+        "ack_tail_after_send_s": 0.15348087500000007,
+        "actual_source_records_per_s": 107502.87103338844,
+        "backlog": {
+          "gap_slope_records_per_s": null,
+          "max_receive_commit_gap": 0,
+          "measurement": "receiver backlog exact at samples; source backlog linearly interpolated by monotonic_ns",
+          "samples": [
+            {
+              "committed_attempts": 0,
+              "elapsed_s": 1.5625e-05,
+              "forwarded": 0,
+              "queue_gap": 0,
+              "receive_commit_gap": 0,
+              "received": 0,
+              "sink_consumed": 0,
+              "source_commit_gap_estimated": 16.396669703739544,
+              "source_receive_gap_estimated": 16.396669703739544,
+              "source_sent_interpolated": 16.396669703739544
+            },
+            {
+              "committed_attempts": 54000,
+              "elapsed_s": 0.65359825,
+              "forwarded": 54000,
+              "queue_gap": 0,
+              "receive_commit_gap": 0,
+              "received": 54000,
+              "sink_consumed": 0,
+              "source_commit_gap_estimated": 0.0,
+              "source_receive_gap_estimated": 0.0,
+              "source_sent_interpolated": 54000.0
+            }
+          ],
+          "sampling_caveat": "periodic samples, not per-record queues; interpolation can yield small negative gaps",
+          "source_aligned_steady_samples": 0,
+          "source_commit_gap_slope_records_per_s": null,
+          "steady_samples": 0
+        },
+        "canonical_bytes_per_s": 23961827.9206473,
+        "committed_attempts_per_s_including_drain": 82619.56556649556,
+        "completion_denominator_s": 0.655793041,
+        "cpu": {
+          "receiver": {
+            "cpu_cores_over_observed_interval": 0.8213371663117912,
+            "max_rss_kib": 83744,
+            "sample_count": 2
+          },
+          "redis": {
+            "cpu_cores_over_observed_interval": 0.09777823408473704,
+            "max_rss_kib": 11664,
+            "sample_count": 2
+          },
+          "source": {
+            "cpu_cores_over_observed_interval": 0.15644517453557927,
+            "max_rss_kib": 10448,
+            "sample_count": 2
+          }
+        },
+        "dcrb_compatibility": "not-adapted",
+        "dedup_cache": {
+          "dedup_cache_bytes": 23544000,
+          "dedup_entries": 54000,
+          "dedup_evictions": 0,
+          "dedup_payload_bytes": 15714000,
+          "semantics": "bounded FIFO; payload is held once; cache bytes include conservative entry/key/link accounting, not RSS; evictions are not durability failures"
+        },
+        "delivery_contract": "tickshelf-delivery-v1-20261117",
+        "durable_unique_count": 54000,
+        "durable_unique_records_per_s_including_drain": 82619.56556649556,
+        "end_to_end_durable_unique_records_per_s": 82343.05127370206,
+        "end_to_end_input_records_per_s": 82343.05127370206,
+        "full_chain_contract": {
+          "coverage_basis": "independently inspected input records",
+          "dcrb_compatibility": "not-adapted",
+          "delivery_contract": "tickshelf-delivery-v1-20261117",
+          "eligible": true,
+          "record_contract": "experimental-RCD1-v1",
+          "scope": "complete five-level JSON/TCP/SHA/dedup/Redis/FULL under the stated input; no production certification implied",
+          "source": {
+            "authenticity_scope": "file hashes establish integrity, not independent proof of historical source authenticity",
+            "authorization_declared": false,
+            "kind": "synthetic",
+            "production_capture_supplied": false,
+            "production_qualified": false,
+            "production_validation": "not-performed; synthetic or production-shape input is not production capture",
+            "provenance": "deterministic record.hpp formula, not production capture"
+          },
+          "violations": {}
+        },
+        "input_source": {
+          "authenticity_scope": "file hashes establish integrity, not independent proof of historical source authenticity",
+          "authorization_declared": false,
+          "kind": "synthetic",
+          "production_capture_supplied": false,
+          "production_qualified": false,
+          "production_validation": "not-performed; synthetic or production-shape input is not production capture",
+          "provenance": "deterministic record.hpp formula, not production capture"
+        },
+        "measurement_class": "full-path-observation",
+        "minimum_durable_records_per_s": 0,
+        "notes": [
+          "Receiver rate includes drain and alone never establishes sustainable capacity.",
+          "Progress cannot observe kernel/socket/source queues; timestamps are receiver-relative.",
+          "CPU stage timers measure wall time, not inspected CPU hotspots."
+        ],
+        "offered_records_per_s": null,
+        "offered_unique_records_per_s": null,
+        "physical_rows": 54000,
+        "raw_payload_bytes_per_s": 36930739.55629242,
+        "receiver_records_per_s_including_drain": 82619.56556649556,
+        "source_ack_elapsed_s": 0.655793041,
+        "source_bound_warning": null,
+        "source_offer_ratio": null,
+        "source_schedule": {
+          "available": true,
+          "planned_minus_sent_peak": 54000,
+          "planned_minus_sent_slope_records_per_s": null,
+          "samples": [
+            [
+              0.001722875,
+              54000
+            ],
+            [
+              0.502312333,
+              0
+            ],
+            [
+              0.655793666,
+              0
+            ]
+          ],
+          "scope": "planned source arrivals minus socket-accepted sends; synchronous send intervals are sampled before/after, not per record",
+          "send_complete_lag_max_s": 0.502307,
+          "send_start_lag_max_s": 0.502281875,
+          "steady_samples": 1
+        },
+        "source_schedule_acceptance": {
+          "max_lag_s": 1.0,
+          "required": true
+        },
+        "source_send_elapsed_s": 0.502312166,
+        "validated_input_unique_count": 54000,
+        "verdict": "not-a-capacity-test",
+        "wire_bytes_per_s": 36932715.78952299
+      },
+      "full_path_stage_metrics": {
+        "counters": {
+          "ablation_work_schema": 1,
+          "attempted": 54000,
+          "backend_candidates": 0,
+          "backend_candidates_observable": 1,
+          "backend_digest_cached": 54000,
+          "backend_digest_recomputed": 0,
+          "backend_ignored": 0,
+          "backend_inserted": 54000,
+          "backend_lookup_assume_unique": 0,
+          "backend_lookup_calls": 54000,
+          "backend_lookup_exact": 1,
+          "buffered_records": 0,
+          "canonical_bytes": 15714000,
+          "committed_attempts": 54000,
+          "dedup_cache_bytes": 23544000,
+          "dedup_candidate_comparisons": 0,
+          "dedup_dropped": 0,
+          "dedup_entries": 54000,
+          "dedup_lookup_records": 54000,
+          "dedup_payload_bytes": 15714000,
+          "file_sync_calls": 0,
+          "file_write_bytes": 0,
+          "file_write_calls": 0,
+          "forwarded": 54000,
+          "hash_api_calls": 54000,
+          "hash_bypassed_records": 0,
+          "hash_compute_batches": 53,
+          "hash_context_allocations": 1,
+          "hash_flush_age": 0,
+          "hash_flush_bytes": 0,
+          "hash_flush_rows": 52,
+          "hash_flush_tail": 1,
+          "hash_input_bytes": 15714000,
+          "hash_invocations": 54000,
+          "hash_pending_bytes_peak": 302080,
+          "hash_pending_capacity": 1024,
+          "hash_pending_records_peak": 1024,
+          "hash_scratch_capacity": 1024,
+          "ignored": 0,
+          "index_rows": 0,
+          "inserted": 54000,
+          "max_queue_age_ns": 0,
+          "metadata_kv_rows": 0,
+          "metadata_sql_rows": 0,
+          "network_bytes": 24220218,
+          "parsed": 54000,
+          "payload_bytes": 15714000,
+          "pipeline_transactions": 7,
+          "range_candidate_segments": 0,
+          "range_decoded_rows": 0,
+          "range_emitted_rows": 0,
+          "received": 54000,
+          "received_frames": 53,
+          "record_encoded_records": 54000,
+          "redis_build_records": 54000,
+          "redis_cleanup_batches": 7,
+          "redis_commands": 74517,
+          "redis_flush_age": 0,
+          "redis_flush_bytes": 0,
+          "redis_flush_rows": 6,
+          "redis_flush_tail": 1,
+          "redis_network_execs": 21,
+          "redis_pending_bytes_peak": 2416640,
+          "redis_pending_capacity": 8192,
+          "redis_pending_records_peak": 8192,
+          "redis_publish_records": 54000,
+          "redis_readback_records": 54000,
+          "redis_scratch_capacity": 8192,
+          "rejected": 0,
+          "rocksdb_get_calls": 0,
+          "rocksdb_key_bytes": 0,
+          "rocksdb_put_ops": 0,
+          "rocksdb_range_iterator_steps": 0,
+          "rocksdb_range_read_bytes": 0,
+          "rocksdb_value_bytes": 0,
+          "rocksdb_write_batches": 0,
+          "rocksdb_writebatch_bytes": 0,
+          "sink_consumed": 0,
+          "sqlite_begin_calls": 7,
+          "sqlite_bind_blob_calls": 216000,
+          "sqlite_bind_calls": 270000,
+          "sqlite_bind_int64_calls": 0,
+          "sqlite_bind_text_calls": 54000,
+          "sqlite_changes_calls": 54000,
+          "sqlite_clear_bindings_calls": 108000,
+          "sqlite_commit_calls": 7,
+          "sqlite_exec_calls": 14,
+          "sqlite_lookup_bind_calls": 54000,
+          "sqlite_lookup_candidate_bytes": 0,
+          "sqlite_lookup_candidate_rows": 0,
+          "sqlite_lookup_clear_bindings_calls": 54000,
+          "sqlite_lookup_matches": 0,
+          "sqlite_lookup_prepare_calls": 1,
+          "sqlite_lookup_reset_calls": 54000,
+          "sqlite_lookup_rows": 54000,
+          "sqlite_lookup_step_calls": 54000,
+          "sqlite_prepare_calls": 2,
+          "sqlite_reset_calls": 108000,
+          "sqlite_rollback_calls": 0,
+          "sqlite_step_calls": 108000,
+          "store_digest_bytes": 0,
+          "store_digest_cache_hits": 54000,
+          "store_digest_computed": 0,
+          "store_digest_override_calls": 0,
+          "store_flush_age": 0,
+          "store_flush_bytes": 0,
+          "store_flush_rows": 6,
+          "store_flush_tail": 1,
+          "store_pending_bytes_peak": 2383872,
+          "store_pending_capacity": 8192,
+          "store_pending_records_peak": 8192,
+          "symbol_index_rows": 0,
+          "transaction_bytes_max": 2383872,
+          "transaction_bytes_min": 1410768,
+          "transaction_bytes_sum": 15714000,
+          "transaction_rows_max": 8192,
+          "transaction_rows_min": 4848,
+          "transaction_rows_sum": 54000,
+          "transactions": 7
+        },
+        "stages": {
+          "consume_checksum": {
+            "count": 53,
+            "max_ns": 433709,
+            "p50_upper_ns": 433709,
+            "p95_upper_ns": 433709,
+            "p99_upper_ns": 433709,
+            "sum_ns": 18635001
+          },
+          "dedup_lookup": {
+            "count": 53,
+            "max_ns": 4992291,
+            "p50_upper_ns": 524287,
+            "p95_upper_ns": 1048575,
+            "p99_upper_ns": 4992291,
+            "sum_ns": 24392163
+          },
+          "deframe_crc": {
+            "count": 372,
+            "max_ns": 1591708,
+            "p50_upper_ns": 1023,
+            "p95_upper_ns": 1591708,
+            "p99_upper_ns": 1591708,
+            "sum_ns": 66052911
+          },
+          "hash_compute": {
+            "count": 53,
+            "max_ns": 1162416,
+            "p50_upper_ns": 262143,
+            "p95_upper_ns": 524287,
+            "p99_upper_ns": 1162416,
+            "sum_ns": 12499913
+          },
+          "hash_queue_oldest_age": {
+            "count": 53,
+            "max_ns": 939958,
+            "p50_upper_ns": 939958,
+            "p95_upper_ns": 939958,
+            "p99_upper_ns": 939958,
+            "sum_ns": 38168042
+          },
+          "json_parse_normalize": {
+            "count": 53,
+            "max_ns": 1583541,
+            "p50_upper_ns": 1583541,
+            "p95_upper_ns": 1583541,
+            "p99_upper_ns": 1583541,
+            "sum_ns": 61266166
+          },
+          "record_encode": {
+            "count": 53,
+            "max_ns": 923084,
+            "p50_upper_ns": 923084,
+            "p95_upper_ns": 923084,
+            "p99_upper_ns": 923084,
+            "sum_ns": 37816084
+          },
+          "redis_build": {
+            "count": 7,
+            "max_ns": 2130208,
+            "p50_upper_ns": 2097151,
+            "p95_upper_ns": 2130208,
+            "p99_upper_ns": 2130208,
+            "sum_ns": 13321999
+          },
+          "redis_cleanup_wait": {
+            "count": 7,
+            "max_ns": 5487292,
+            "p50_upper_ns": 5487292,
+            "p95_upper_ns": 5487292,
+            "p99_upper_ns": 5487292,
+            "sum_ns": 37301875
+          },
+          "redis_decode": {
+            "count": 7,
+            "max_ns": 1176083,
+            "p50_upper_ns": 1048575,
+            "p95_upper_ns": 1176083,
+            "p99_upper_ns": 1176083,
+            "sum_ns": 5138709
+          },
+          "redis_publish_wait": {
+            "count": 7,
+            "max_ns": 8860250,
+            "p50_upper_ns": 8388607,
+            "p95_upper_ns": 8860250,
+            "p99_upper_ns": 8860250,
+            "sum_ns": 56571834
+          },
+          "redis_queue_oldest_age": {
+            "count": 7,
+            "max_ns": 34597416,
+            "p50_upper_ns": 33554431,
+            "p95_upper_ns": 34597416,
+            "p99_upper_ns": 34597416,
+            "sum_ns": 210391582
+          },
+          "redis_read_wait": {
+            "count": 7,
+            "max_ns": 2070166,
+            "p50_upper_ns": 2070166,
+            "p95_upper_ns": 2070166,
+            "p99_upper_ns": 2070166,
+            "sum_ns": 10056624
+          },
+          "sqlite_begin": {
+            "count": 7,
+            "max_ns": 19167,
+            "p50_upper_ns": 19167,
+            "p95_upper_ns": 19167,
+            "p99_upper_ns": 19167,
+            "sum_ns": 115960
+          },
+          "sqlite_checkpoint": {
+            "count": 1,
+            "max_ns": 1584,
+            "p50_upper_ns": 1584,
+            "p95_upper_ns": 1584,
+            "p99_upper_ns": 1584,
+            "sum_ns": 1584
+          },
+          "sqlite_commit": {
+            "count": 7,
+            "max_ns": 23719458,
+            "p50_upper_ns": 23719458,
+            "p95_upper_ns": 23719458,
+            "p99_upper_ns": 23719458,
+            "sum_ns": 130196166
+          },
+          "sqlite_lookup": {
+            "count": 54000,
+            "max_ns": 14416,
+            "p50_upper_ns": 2047,
+            "p95_upper_ns": 2047,
+            "p99_upper_ns": 2047,
+            "sum_ns": 63391681
+          },
+          "sqlite_lookup_bind": {
+            "count": 54000,
+            "max_ns": 9166,
+            "p50_upper_ns": 63,
+            "p95_upper_ns": 63,
+            "p99_upper_ns": 63,
+            "sum_ns": 1555069
+          },
+          "sqlite_lookup_clear_bindings": {
+            "count": 54000,
+            "max_ns": 9500,
+            "p50_upper_ns": 63,
+            "p95_upper_ns": 63,
+            "p99_upper_ns": 63,
+            "sum_ns": 1940813
+          },
+          "sqlite_lookup_prepare": {
+            "count": 1,
+            "max_ns": 6208,
+            "p50_upper_ns": 6208,
+            "p95_upper_ns": 6208,
+            "p99_upper_ns": 6208,
+            "sum_ns": 6208
+          },
+          "sqlite_lookup_reset": {
+            "count": 54000,
+            "max_ns": 4750,
+            "p50_upper_ns": 63,
+            "p95_upper_ns": 127,
+            "p99_upper_ns": 127,
+            "sum_ns": 3400291
+          },
+          "sqlite_lookup_step": {
+            "count": 54000,
+            "max_ns": 13459,
+            "p50_upper_ns": 511,
+            "p95_upper_ns": 1023,
+            "p99_upper_ns": 2047,
+            "sum_ns": 25154151
+          },
+          "sqlite_prepare": {
+            "count": 2,
+            "max_ns": 7875,
+            "p50_upper_ns": 7875,
+            "p95_upper_ns": 7875,
+            "p99_upper_ns": 7875,
+            "sum_ns": 14083
+          },
+          "sqlite_step": {
+            "count": 108000,
+            "max_ns": 23459,
+            "p50_upper_ns": 1023,
+            "p95_upper_ns": 4095,
+            "p99_upper_ns": 4095,
+            "sum_ns": 93874570
+          },
+          "store_complete_oldest_age": {
+            "count": 7,
+            "max_ns": 98858375,
+            "p50_upper_ns": 98858375,
+            "p95_upper_ns": 98858375,
+            "p99_upper_ns": 98858375,
+            "sum_ns": 632636832
+          },
+          "store_queue_oldest_age": {
+            "count": 7,
+            "max_ns": 55688000,
+            "p50_upper_ns": 55688000,
+            "p95_upper_ns": 55688000,
+            "p99_upper_ns": 55688000,
+            "sum_ns": 341123331
+          },
+          "store_total": {
+            "count": 7,
+            "max_ns": 49597750,
+            "p50_upper_ns": 49597750,
+            "p95_upper_ns": 49597750,
+            "p99_upper_ns": 49597750,
+            "sum_ns": 291510377
+          },
+          "store_validate": {
+            "count": 7,
+            "max_ns": 126750,
+            "p50_upper_ns": 126750,
+            "p95_upper_ns": 126750,
+            "p99_upper_ns": 126750,
+            "sum_ns": 643291
+          }
+        }
+      },
+      "full_path_store": {
+        "backend": "sqlite_compact",
+        "backend_lookup_metric_scope": "workload only, excluding recovery/export; lookup_calls counts candidate SQL executions (including the original INSERT subquery); candidates counts rows returned for C++ exact comparison, not SQLite internal visits; backend_candidates_observable=0 means internal subquery candidates are unavailable, not measured zero",
+        "compact_lookup_algorithm": "prepared digest-candidate SELECT; exact canonical byte comparison in C++; reset/clear lookup before prepared INSERT VALUES; both inside BEGIN IMMEDIATE",
+        "counters": {
+          "attempted": 54000,
+          "ignored": 0,
+          "inserted": 54000,
+          "transactions": 7
+        },
+        "database": "/tmp/tickshelf-ablation-20261117.UYJcYD/truth-final-compact-54k/cases/p1h1d1r1s1-r1-5b16f7dbe8384963bff3f5fd79298881/compact-record.sqlite3",
+        "deduplication": "nonunique fixed32 SHA-256 candidates then exact full payload comparison; separate prepared SELECT and INSERT VALUES within BEGIN IMMEDIATE",
+        "digest_cache_contract": "private trusted EncodedRecord.sha256 valid only while canonical bytes unchanged; missing SHA-256 computed and separately timed/counted; test override takes precedence",
+        "durability_scope": "SQLite FULL WAL commit with OS sync; no physical PLP claim",
+        "durable": true,
+        "hardware_plp": "unknown",
+        "lookup_metric_scope": "sqlite_lookup_*_calls are subsets of aggregate sqlite_* workload API counters, not additional calls to add again; lookup prepare/step timings are subsets of aggregate prepare/step, while bind/reset/clear are independently timed; prepare includes open-time lifetime reuse; step counts each ROW/DONE/error sqlite3_step; rows counts record lookups and candidate_bytes counts returned canonical bytes, not physical I/O; library APIs are not syscalls",
+        "normal_diagnostic": false,
+        "physical_duplicate_rows": 0,
+        "physical_power_loss_tested": false,
+        "physical_rows": 54000,
+        "prepare_metric_scope": "sqlite_prepare measures workload INSERT/metadata and digest-candidate lookup SELECT prepares, including open-time lifetime reuse; sqlite_lookup_prepare is a subset; export/recovery/schema prepares excluded",
+        "reuse_statement": true,
+        "schema_cost": "INTEGER PRIMARY KEY payload table; fixed32 nonunique digest index and symbol/time indexes contain rowid only; no UNIQUE(digest,payload)",
+        "sqlite": {
+          "checkpoint_on_finish": "PASSIVE",
+          "compile_options": [
+            "ATOMIC_INTRINSICS=1",
+            "BUG_COMPATIBLE_20160819",
+            "CCCRYPT256",
+            "COMPILER=clang-17.0.0",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=2000",
+            "DEFAULT_CKPTFULLFSYNC",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=32768",
+            "DEFAULT_LOOKASIDE=1200,102",
+            "DEFAULT_MEMSTATUS=0",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=1",
+            "DEFAULT_WORKER_THREADS=0",
+            "DQS=3",
+            "ENABLE_API_ARMOR",
+            "ENABLE_BYTECODE_VTAB",
+            "ENABLE_COLUMN_METADATA",
+            "ENABLE_DBSTAT_VTAB",
+            "ENABLE_FTS3",
+            "ENABLE_FTS3_PARENTHESIS",
+            "ENABLE_FTS3_TOKENIZER",
+            "ENABLE_FTS4",
+            "ENABLE_FTS5",
+            "ENABLE_LOCKING_STYLE=1",
+            "ENABLE_MATH_FUNCTIONS",
+            "ENABLE_NORMALIZE",
+            "ENABLE_PREUPDATE_HOOK",
+            "ENABLE_RTREE",
+            "ENABLE_SESSION",
+            "ENABLE_SNAPSHOT",
+            "ENABLE_SQLLOG",
+            "ENABLE_STMT_SCANSTATUS",
+            "ENABLE_UNKNOWN_SQL_FUNCTION",
+            "ENABLE_UPDATE_DELETE_LIMIT",
+            "HAS_CODEC_RESTRICTED",
+            "HAVE_ISNAN",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=127",
+            "MAX_LENGTH=2147483645",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=1073741824",
+            "MAX_PAGE_COUNT=1073741823",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=500000",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=8",
+            "MUTEX_UNFAIR",
+            "OMIT_AUTORESET",
+            "OMIT_LOAD_EXTENSION",
+            "STMTJRNL_SPILL=131072",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=2",
+            "USE_URI"
+          ],
+          "last_checkpoint": {
+            "called": true,
+            "checkpointed_frames": 1397,
+            "log_frames": 1397
+          },
+          "pragmas": {
+            "cache_size": 2000,
+            "checkpoint_fullfsync": 1,
+            "foreign_keys": 1,
+            "fullfsync": 1,
+            "journal_mode": "wal",
+            "page_size": 4096,
+            "synchronous": 2,
+            "synchronous_name": "FULL",
+            "user_version": 2,
+            "wal_autocheckpoint": 1000
+          },
+          "schema": [
+            "CREATE TABLE records(id INTEGER PRIMARY KEY, payload BLOB NOT NULL, symbol TEXT NOT NULL, time BLOB NOT NULL CHECK(typeof(time)='blob' AND length(time)=8), digest BLOB NOT NULL CHECK(typeof(digest)='blob' AND length(digest)=32))",
+            "CREATE INDEX records_digest ON records(digest)",
+            "CREATE INDEX records_symbol_time ON records(symbol,time)"
+          ],
+          "source_id": "2023-10-10 13:08:14 1b37c146ee9ebb7acd0160c0ab1fd11017a419fa8a3187386ed8cb32b709aapl",
+          "version": "3.43.2"
+        },
+        "sqlite_api_count_scope": "library API calls, NOT syscalls/kernel calls; begin/commit count sqlite3_exec calls in the same scope as corresponding Timer counts; prepare/step count workload API scope (including separate lookup when selected); bind/reset/clear_bindings/changes and error rollback/cleanup count workload API invocations; schema, recovery and export APIs excluded; no per-record JSON logging",
+        "sqlite_compact_lookup": "separate",
+        "statement_reuse_scope": "store lifetime, prepared at open; reset/rebind within each batch",
+        "store_lookup": "exact",
+        "sync_method": "SQLite WAL synchronous=FULL",
+        "time_encoding": "uint64 big-endian 8-byte BLOB",
+        "transaction_model": "light"
+      },
+      "hardware": "hw.model: Mac14,9\nhw.memsize: 17179869184\nhw.ncpu: 12\nhw.physicalcpu: 12\n",
+      "input": {
+        "bytes": 24220218,
+        "canonical_bytes": 15714000,
+        "checksum_all": "b0a8a79f6ce86dd3",
+        "checksum_unique": "b0a8a79f6ce86dd3",
+        "coverage": {
+          "all_records_full_five_level_baseline": true,
+          "full_five_level_baseline_records": 54000,
+          "observed_symbols": 5400,
+          "records": 54000
+        },
+        "generator": "independent-python-record.hpp-formula",
+        "input": "json",
+        "path": "/private/tmp/tickshelf-ablation-20261117.UYJcYD/truth-final-compact-54k/inputs/input-a928f46453b54fabb25d36d4e9488fa6.iqb",
+        "raw_payload_bytes": 24218922,
+        "records": 54000,
+        "sha256": "7ced3afc37962660491a5e1aaadf62da837de11362260f069c0ad9c86000bb21",
+        "source": {
+          "authorized": false,
+          "kind": "synthetic",
+          "provenance": "deterministic record.hpp formula, not production capture"
+        },
+        "source_mode": "file_replay",
+        "unique_records": 54000
+      },
+      "invalid_rows": 8,
+      "measured_source_sha256": {
+        "CMakeLists.txt": "cdb45eaa00f90358ee63d96dc5ebc814d13a366ab1072696b9c935dcb31a1b1d",
+        "bench/config.cpp": "11ffa449051e1784a639784df58e6a2ea83350b183e619bc467289bbf04bc475",
+        "bench/config.hpp": "98417e60f2422fee1a5d87835523ee3a4a1b3b39250fc005340156512ec0a2f1",
+        "bench/engine_ablation.cpp": "cb774f043a85d3576d98b1019c90542d7e2b971f8a92fa5fa367efec40e40033",
+        "bench/hash.cpp": "ae69ca8f8d0518b86b842c9e063f47a20e714c1b8a0332c17adcc8f619f49d9a",
+        "bench/hash.hpp": "dfb6bbcd01df58e278edd843cbe993043a069d5625d62e91daec5837eddc7df2",
+        "bench/main.cpp": "ad5010b11f6421fc520f52588fe3f08ba58062529e3749fde66c7a44f40a3859",
+        "bench/metrics.hpp": "893f790f96e856a9b3fa8f50efb534dd955c45258002fefbde553e16a0884c13",
+        "bench/pipeline.cpp": "91f83c7aa74e83cead996b6c9053110d16f95ae37b29356fc6f2822903a40cdd",
+        "bench/pipeline.hpp": "221567a964cb3efea1efc7d17179023cecda3731a1be39aaf1c16012bfba2d41",
+        "bench/protocol.cpp": "f3def92aa43298765e2add920efc402710a62ca79aadf587312447096e3bd66e",
+        "bench/protocol.hpp": "a47a9d0fedf10c22605d738836d04ab2d9e0d2e2403d17b3b48c825bffc1c886",
+        "bench/record.cpp": "b83ab1cda8aa719ca050e2746d5a2b03358319a5f61784e4edab79931a0669fb",
+        "bench/record.hpp": "01b421a770bfaec7d36d80d796ba37bdae05b6fb8d6bf6d19ed2a247bf6add0a",
+        "bench/rocks_record_store.cpp": "dcbb77a4fdf24d947f89d3772ef0ee8da0f35874903d8b5e6a9e96a61b65c8b5",
+        "bench/rocks_record_store.hpp": "0a699761b6ac4dc5f0763f01a403b3a0f92df88e5ce1f4050cc28c201598542c",
+        "bench/rocks_reference.cpp": "b7b6fbc6c1f00ee315de0dbc69abb6117a10cfd9e6719f5a2d5dccea439b3e55",
+        "bench/sqlite_probe.cpp": "48def30855d943d4c2cec8c1a7180f646dc128732796447ad8b5acb98aad8d09",
+        "bench/store.cpp": "2e72425ecef341035647f9b79bc0c29410fffc70662d6626aaaa8639680bdc07",
+        "bench/store.hpp": "2018c63ebbd41edc63c16fd79fe8b5b1f366286e38d848186fd9b447a8bd3955",
+        "scripts/pipeline_bench.py": "ac17adef15ca1eaa3fc03e421201f0df8eef3a4643d1b831d26fd7e788eecc13",
+        "scripts/pipeline_bench_anomaly.py": "79cdae67b7785be2eacd53e8e1d114fb500f8ccaa51f9b3595b4c6fa3f186b3d",
+        "scripts/pipeline_bench_capture.py": "669385240750e01a8e0725a86bfd11d4738fa4b8d7a6d829b1a246ef293a94b6",
+        "scripts/pipeline_bench_processes.py": "b7f587d84813f6f33b86266c57bdf3fb646034e2c6dc5286d4bb329b3616bd2d",
+        "scripts/pipeline_bench_support.py": "b0c670c117f180d0ae0381668621a9c49ebacf4f800e247c6faf56fc4ad7ab9b",
+        "scripts/pipeline_bench_syscalls.py": "e1ab97d9c1360fce76e06172f36b31a13eb0f3550312d1fb2c8820f746d1f1a3",
+        "scripts/pipeline_bench_truth.py": "63750e99d7080c4c69ee27268dae2be5a96db22cbadfb0ccbcd4141893bdf40a",
+        "scripts/stack_runtime.py": "3115d0464536d18f32f41a7baac24c01daaa60b38cb4e70dd6aab36a9f0e3501",
+        "scripts/test_pipeline_bench.py": "3fe393066f03d59641939e2040547d82c2c23912889d4cb0463fee6c46d4d047",
+        "scripts/test_pipeline_bench_anomaly.py": "a7c926c1d94fe892ea3351542eb5f93b44e006eba5cdb2eca056bacb50b4b197",
+        "scripts/test_pipeline_bench_capacity.py": "6c969f36cf2d0aa8376f6d039e48fa6e8d5665568e971d180f4ad5e4d876ada0",
+        "scripts/test_pipeline_bench_capture.py": "fec10e4cc3cd10f0f42ac5c6de0da19081e152e06b5679a2adde16e3f9548e09",
+        "scripts/test_pipeline_bench_processes.py": "3adf415315f8f4c66ad60f65b8be171ba67a524cce23ec365f17408a3db1eaed",
+        "scripts/test_pipeline_bench_qualification.py": "458dfe18c6b905490774f2382748af380dc239c44968f9f0ed11c0d366512a77",
+        "scripts/test_pipeline_bench_source.py": "c6392a6b9e233b1dbea30619e7b815aa21b9de6fbefc8d067366455ce9909e2b",
+        "scripts/test_pipeline_bench_syscalls.py": "bf96dca5543ddaae66f61c0846148e324180b40401f087bdf1aa63847c9527fc",
+        "scripts/test_pipeline_bench_truth.py": "ed075521a27f1540d41bac5b593d27f5b287d961eab99478a5e0b370633b3988",
+        "src/apps/capacity/main.cpp": "2e9b1d84a71406e4583e2484f4dc74daee752bd4fbc483bd17b1c3fe74a55f53",
+        "src/apps/evictor/main.cpp": "714d5d39072a16ec8d22fdd1d15ad0df5b9d91d7eb590879685849a57ccbda16",
+        "src/apps/feedgen/main.cpp": "5dbec6f631cc2e7cc4d0c65cd50b0e93b6d69c110f259a6c476bf6fc786e00d3",
+        "src/apps/floodgen/main.cpp": "6827dff9f0f49807fa4b7a3638604d7c29217a419289ddb540a63946b5c53e9b",
+        "src/apps/persister/main.cpp": "70c87236792d81d90f6c171080dcde0eabd44909d4ad7d8a80c8a00672ed3aa7",
+        "src/apps/queryd/main.cpp": "198750ff308fb3377d98244abecdeb8110331406a30d40d6e656cbc6d0ba6308",
+        "src/apps/tickshelfd/main.cpp": "02d5c53a564f5c92c3bf4847ff0973b1e3f6470f606a132de069bd4aa25c4ded",
+        "src/common/civil.cpp": "a50044fdd62de986819f56c2f341f24db4df0792fa095a07d35454680b2257ce",
+        "src/common/civil.hpp": "05dd5c46debb83e21686ac71e856de006d0d9ce4ed8f647259a7cb93bee4c999",
+        "src/common/crc32.cpp": "3ea3b072df68a787252c9c8be6042c9d9a89bdb8117f5da172509de0db36de16",
+        "src/common/crc32.hpp": "c88f5553fc273f8685397184daa1f7fb108aecf1cecb6f62b251fbd5ce4a3ae0",
+        "src/common/endian.hpp": "a3d822783f26f4dcfc42782aba327b9e7ab3c6406d5ae66eb884216e40cf9bb5",
+        "src/common/fixed.hpp": "9b38aaac2f764b25de86e706463107d8f157ab9b4609dc3a852f8f1b02e81495",
+        "src/common/frame_writer.hpp": "dfa2bc67f482b28e57880d5a631b39f3ea6eddb470b0e4152e001cfeaa0cba78",
+        "src/common/net.cpp": "ee807f5858b782c9875210765168a25908d6a81cbae5bdea1cb192a9f4e1c421",
+        "src/common/net.hpp": "c605020adeb1f718829e5e189099864a667e54369344eb00a57b8c36d07af4d0",
+        "src/common/startup_config.cpp": "03ca59b0c9da9dd25cd0dc550beba820ed89cce525aae9070039aa73f63de6f4",
+        "src/common/startup_config.hpp": "ee8d9be8635afd16bcfc89416e5ddeed999bbeffa3c31ddb64b2b08de6c40729",
+        "src/common/tick.cpp": "b30112c7ec62c72478446050e873f5210692efcd3836df5e3b93f2b7b89a060d",
+        "src/common/tick.hpp": "c276807c9615cf47fbcc7da202058f30fbc561e38a48d32b9974e4e18ddf45b8",
+        "src/components/coverage/coverage_ledger.hpp": "01bc76465e26da6cd22d8a198155af08b519fd3b5565be7e8036b1fd3adb6637",
+        "src/components/coverage/interval_set.hpp": "e23bf48f6209c8741e75ae7841669605338248f872af779113e0a35ab3bce4b7",
+        "src/components/engine/bounded_queue.hpp": "4a9c6e07ea519b8924fa451f754eb58bcfb26bf6a1d9721c24e69a5995a18f2c",
+        "src/components/engine/dedupe.cpp": "13a6c5f7f90363f3b8470b250a826161c69b1010c1205f910f8f6a9e2254b591",
+        "src/components/engine/dedupe.hpp": "43b4eef509f8a5d5f74d8ba052b548edb9a940f2fee981a121422876716e212f",
+        "src/components/engine/engine.cpp": "0d25205a9d819b2f270d29f58d15adec63887dce50d91d010e03b98970dbcdb2",
+        "src/components/engine/engine.hpp": "50a66ab747a2d2514aa137793aca30917b5f3263b6754ccc1f40d3149073ef21",
+        "src/components/engine/slice.hpp": "378f7ac1f859da9d75e03fc598565ba130f3aeca3a477fa8959c76bf53e989ae",
+        "src/components/engine/write_policy.hpp": "e7919d85b49790275ab442d3bd5147df71a42eb0b05007b6e293a7037d4f5990",
+        "src/components/evict/evictor.cpp": "fe82a67b2b26eff83092b251009c8f321f661f909cd806acf4d02b4d9a3420aa",
+        "src/components/evict/evictor.hpp": "375b00d1cf9025d229913d1dc58ff37cf63a8d9299eae6d8811ce506b68c4da2",
+        "src/components/ingest/frame_parser.cpp": "b6f8657c175875c18080ecc74cb81762f93e91ec4c65263d71f838273f7220cd",
+        "src/components/ingest/frame_parser.hpp": "6fdeb50a33c9c3b4369a81eae3f152b081b9c2987dd411b82bd051ee18f5fb6b",
+        "src/components/ingest/ingestor.cpp": "3bf58d692d0d39644679cc49cdc4b78f05bff4b60c6616c7fb03102850294827",
+        "src/components/ingest/ingestor.hpp": "72193ff4ed510e8fd33a8d3f70585c821524bf7ff6b578ad476ed4a4a9c8a18c",
+        "src/components/lease/lease_persister.cpp": "abe5035a39e1143dd861a614ace2e80db42b9df5f2c35e186c4751cc10a6ac2a",
+        "src/components/lease/lease_persister.hpp": "7c23d79a3f4f47dcd52861f1068e4613e0a132353072e3d2ad33383f9de129ea",
+        "src/components/query/reader.cpp": "d60c678ef02c208878261c1a8df21993d93042340c9d98c06513bddca4bf25eb",
+        "src/components/query/reader.hpp": "0bf2767eb3f9aba3d18f2691bc8a8d12c996fc9d67bb0016b47e4a2ddc6b40b0",
+        "src/components/redis/redis_shard_pool.cpp": "995fa5459a5c7428445a4bcdc85a355a5bca937daee03966ea5aed8862562ae9",
+        "src/components/redis/redis_shard_pool.hpp": "2def66e9cff8f2ebdd63b3620520a7f3bbe249d367c02940455fed15dd87cd96",
+        "src/components/redis/resp_client.cpp": "f7ddce6e96fa5b3d3c79b982d98bc51277911116b06aaccdd8ba5b782d9c9aaa",
+        "src/components/redis/resp_client.hpp": "d76314aa4c4582d9bd0fdbdd91c16fd56e08dfe8da3a2c8cfa915478bf3ae6ca",
+        "src/components/storage/shard_route.cpp": "28fd4938ad1cb004d9a9e8ad6e8c5ba659a60b535ed31366da36b0339387a4b2",
+        "src/components/storage/shard_route.hpp": "7f12f25deaae4ef98fe5a4d0d327c2c153488e92cb60d858ba45275fb9cc0842",
+        "src/components/storage/sharded_store.cpp": "b189b2d1fce3dbd0a23df03cc5c1f3f68d07ed8c99a5a5d9638b9158a8fadc1a",
+        "src/components/storage/sharded_store.hpp": "54626ed04f6bed2cd02c073f668c8c80d2af563251fb825cf7f1d56b30372e51",
+        "src/components/storage/sqlite_store.cpp": "5417ebbd279cfa9956e24e5593d7c8375c10e85516b8cfb2552d1b118bfed3ff",
+        "src/components/storage/sqlite_store.hpp": "9309a5c73a00e781ee5272a884d1f3d24f7a498a12ef29cc7da1d4077b53e655",
+        "src/components/storage/storage_shard_pool.cpp": "06e6b72ce20cca38ba05091060e9fcb20c1b0bbc6af2e7ebf553896477795ff6",
+        "src/components/storage/storage_shard_pool.hpp": "0f75638dac4112b26d53e94cba5700b8870f62eff85d497e21bcd9e3c0721e61",
+        "src/components/storage/tick_store.hpp": "061738fb29a14e437eb014e747527290d67ef74632d42a6afb6342022b28d552"
+      },
+      "platform": "macOS-15.8.1-arm64-arm-64bit-Mach-O",
+      "public_artifacts": {
+        "csv": {
+          "path": "ablation-truth-compact-20261117.csv",
+          "sha256": "a5f30a3facd56fff7faf7de3eb6088efdcf4df2df80922018bc23b87780b6fd8"
+        },
+        "json": {
+          "path": "ablation-truth-compact-20261117.json",
+          "sha256": "03bc6a96f60d298f39378e5d26c3b56b65ef75d85e50a294a2c23ad96eda64aa"
+        },
+        "md": {
+          "path": "ablation-truth-compact-20261117.md",
+          "sha256": "231ad05272149a14b1aadbf632ff3c4c390481525cb6222a06640be00bea003b"
+        }
+      },
+      "summary_sha256": "920b694e3a9804e9b1c09947bd3388378e93d97c3e19fbc9ae93e7155b491ceb"
+    },
+    "rocks": {
+      "all_24_legal_rows_passed": true,
+      "artifact_directory": "/tmp/tickshelf-ablation-20261117.UYJcYD/truth-final-rocks-54k-v2",
+      "binary_sha256": "cfc8786570a9a2d844c7ec7fda595120abe94adb8e1f100b5efb200ce5e3a432",
+      "compile_flags": [
+        "CMAKE_BUILD_TYPE:STRING=Release",
+        "CMAKE_CXX_COMPILER:FILEPATH=/usr/bin/c++",
+        "CMAKE_CXX_FLAGS:STRING=",
+        "CMAKE_CXX_FLAGS_DEBUG:STRING=-g",
+        "CMAKE_CXX_FLAGS_MINSIZEREL:STRING=-Os -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG",
+        "SQLite3_INCLUDE_DIR:PATH=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include",
+        "SQLite3_LIBRARY:FILEPATH=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libsqlite3.tbd",
+        "simdjson_DIR:PATH=/opt/homebrew/lib/cmake/simdjson",
+        "CMAKE_CXX_FLAGS-ADVANCED:INTERNAL=1",
+        "CMAKE_CXX_FLAGS_DEBUG-ADVANCED:INTERNAL=1",
+        "CMAKE_CXX_FLAGS_MINSIZEREL-ADVANCED:INTERNAL=1",
+        "CMAKE_CXX_FLAGS_RELEASE-ADVANCED:INTERNAL=1",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1",
+        "SQLite3_INCLUDE_DIR-ADVANCED:INTERNAL=1",
+        "SQLite3_LIBRARY-ADVANCED:INTERNAL=1"
+      ],
+      "current_cpp_hpp_match_measured_snapshot": true,
+      "environment_sha256": "b7ab17b4c83eced02a438806a111e8e5c11f0023867827825a025095e55793eb",
+      "full_path_performance": {
+        "ack_tail_after_send_s": 0.16606116599999998,
+        "actual_source_records_per_s": 130234.43706013846,
+        "backlog": {
+          "gap_slope_records_per_s": null,
+          "max_receive_commit_gap": 0,
+          "measurement": "receiver backlog exact at samples; source backlog linearly interpolated by monotonic_ns",
+          "samples": [
+            {
+              "committed_attempts": 0,
+              "elapsed_s": 7.916e-06,
+              "forwarded": 0,
+              "queue_gap": 0,
+              "receive_commit_gap": 0,
+              "received": 0,
+              "sink_consumed": 0,
+              "source_commit_gap_estimated": 16.45416282771538,
+              "source_receive_gap_estimated": 16.45416282771538,
+              "source_sent_interpolated": 16.45416282771538
+            },
+            {
+              "committed_attempts": 54000,
+              "elapsed_s": 0.57837275,
+              "forwarded": 54000,
+              "queue_gap": 0,
+              "receive_commit_gap": 0,
+              "received": 54000,
+              "sink_consumed": 0,
+              "source_commit_gap_estimated": 0.0,
+              "source_receive_gap_estimated": 0.0,
+              "source_sent_interpolated": 54000.0
+            }
+          ],
+          "sampling_caveat": "periodic samples, not per-record queues; interpolation can yield small negative gaps",
+          "source_aligned_steady_samples": 0,
+          "source_commit_gap_slope_records_per_s": null,
+          "steady_samples": 0
+        },
+        "canonical_bytes_per_s": 27060535.58048769,
+        "committed_attempts_per_s_including_drain": 93365.40132872245,
+        "completion_denominator_s": 0.580698041,
+        "cpu": {
+          "receiver": {
+            "cpu_cores_over_observed_interval": 0.790116148019481,
+            "max_rss_kib": 117680,
+            "sample_count": 2
+          },
+          "redis": {
+            "cpu_cores_over_observed_interval": 0.11287373543135444,
+            "max_rss_kib": 11696,
+            "sample_count": 2
+          },
+          "source": {
+            "cpu_cores_over_observed_interval": 0.1504983139084726,
+            "max_rss_kib": 11936,
+            "sample_count": 2
+          }
+        },
+        "dcrb_compatibility": "not-adapted",
+        "dedup_cache": {
+          "dedup_cache_bytes": 23544000,
+          "dedup_entries": 54000,
+          "dedup_evictions": 0,
+          "dedup_payload_bytes": 15714000,
+          "semantics": "bounded FIFO; payload is held once; cache bytes include conservative entry/key/link accounting, not RSS; evictions are not durability failures"
+        },
+        "delivery_contract": "tickshelf-delivery-v1-20261117",
+        "durable_unique_count": 54000,
+        "durable_unique_records_per_s_including_drain": 93365.40132872245,
+        "end_to_end_durable_unique_records_per_s": 92991.53120442506,
+        "end_to_end_input_records_per_s": 92991.53120442506,
+        "full_chain_contract": {
+          "coverage_basis": "independently inspected input records",
+          "dcrb_compatibility": "not-adapted",
+          "delivery_contract": "tickshelf-delivery-v1-20261117",
+          "eligible": true,
+          "record_contract": "experimental-RCD1-v1",
+          "scope": "complete five-level JSON/TCP/SHA/dedup/Redis/FULL under the stated input; no production certification implied",
+          "source": {
+            "authenticity_scope": "file hashes establish integrity, not independent proof of historical source authenticity",
+            "authorization_declared": false,
+            "kind": "synthetic",
+            "production_capture_supplied": false,
+            "production_qualified": false,
+            "production_validation": "not-performed; synthetic or production-shape input is not production capture",
+            "provenance": "deterministic record.hpp formula, not production capture"
+          },
+          "violations": {}
+        },
+        "input_source": {
+          "authenticity_scope": "file hashes establish integrity, not independent proof of historical source authenticity",
+          "authorization_declared": false,
+          "kind": "synthetic",
+          "production_capture_supplied": false,
+          "production_qualified": false,
+          "production_validation": "not-performed; synthetic or production-shape input is not production capture",
+          "provenance": "deterministic record.hpp formula, not production capture"
+        },
+        "measurement_class": "full-path-observation",
+        "minimum_durable_records_per_s": 0,
+        "notes": [
+          "Receiver rate includes drain and alone never establishes sustainable capacity.",
+          "Progress cannot observe kernel/socket/source queues; timestamps are receiver-relative.",
+          "CPU stage timers measure wall time, not inspected CPU hotspots."
+        ],
+        "offered_records_per_s": null,
+        "offered_unique_records_per_s": null,
+        "physical_rows": 54000,
+        "raw_payload_bytes_per_s": 41706567.42408401,
+        "receiver_records_per_s_including_drain": 93365.40132872245,
+        "source_ack_elapsed_s": 0.580698041,
+        "source_bound_warning": null,
+        "source_offer_ratio": null,
+        "source_schedule": {
+          "available": true,
+          "planned_minus_sent_peak": 54000,
+          "planned_minus_sent_slope_records_per_s": null,
+          "samples": [
+            [
+              0.001945166,
+              54000
+            ],
+            [
+              0.414637083,
+              0
+            ],
+            [
+              0.580698708,
+              0
+            ]
+          ],
+          "scope": "planned source arrivals minus socket-accepted sends; synchronous send intervals are sampled before/after, not per record",
+          "send_complete_lag_max_s": 0.414631375,
+          "send_start_lag_max_s": 0.41460725,
+          "steady_samples": 1
+        },
+        "source_schedule_acceptance": {
+          "max_lag_s": 1.0,
+          "required": true
+        },
+        "source_send_elapsed_s": 0.414636875,
+        "validated_input_unique_count": 54000,
+        "verdict": "not-a-capacity-test",
+        "wire_bytes_per_s": 41708799.220832914
+      },
+      "full_path_stage_metrics": {
+        "counters": {
+          "ablation_work_schema": 1,
+          "attempted": 54000,
+          "backend_candidates": 0,
+          "backend_candidates_observable": 1,
+          "backend_digest_cached": 54000,
+          "backend_digest_recomputed": 0,
+          "backend_ignored": 0,
+          "backend_inserted": 54000,
+          "backend_lookup_assume_unique": 0,
+          "backend_lookup_calls": 54000,
+          "backend_lookup_exact": 1,
+          "buffered_records": 0,
+          "canonical_bytes": 15714000,
+          "committed_attempts": 54000,
+          "dedup_cache_bytes": 23544000,
+          "dedup_candidate_comparisons": 0,
+          "dedup_dropped": 0,
+          "dedup_entries": 54000,
+          "dedup_lookup_records": 54000,
+          "dedup_payload_bytes": 15714000,
+          "file_sync_calls": 0,
+          "file_write_bytes": 0,
+          "file_write_calls": 0,
+          "forwarded": 54000,
+          "hash_api_calls": 54000,
+          "hash_bypassed_records": 0,
+          "hash_compute_batches": 53,
+          "hash_context_allocations": 1,
+          "hash_flush_age": 0,
+          "hash_flush_bytes": 0,
+          "hash_flush_rows": 52,
+          "hash_flush_tail": 1,
+          "hash_input_bytes": 15714000,
+          "hash_invocations": 54000,
+          "hash_pending_bytes_peak": 302080,
+          "hash_pending_capacity": 1024,
+          "hash_pending_records_peak": 1024,
+          "hash_scratch_capacity": 1024,
+          "ignored": 0,
+          "index_rows": 54000,
+          "inserted": 54000,
+          "max_queue_age_ns": 0,
+          "metadata_kv_rows": 0,
+          "network_bytes": 24220218,
+          "parsed": 54000,
+          "payload_bytes": 15714000,
+          "pipeline_transactions": 7,
+          "range_candidate_segments": 0,
+          "range_decoded_rows": 0,
+          "range_emitted_rows": 0,
+          "received": 54000,
+          "received_frames": 53,
+          "record_encoded_records": 54000,
+          "redis_build_records": 54000,
+          "redis_cleanup_batches": 7,
+          "redis_commands": 74517,
+          "redis_flush_age": 0,
+          "redis_flush_bytes": 0,
+          "redis_flush_rows": 6,
+          "redis_flush_tail": 1,
+          "redis_network_execs": 21,
+          "redis_pending_bytes_peak": 2416640,
+          "redis_pending_capacity": 8192,
+          "redis_pending_records_peak": 8192,
+          "redis_publish_records": 54000,
+          "redis_readback_records": 54000,
+          "redis_scratch_capacity": 8192,
+          "rejected": 0,
+          "rocksdb_dedup_candidate_rows": 0,
+          "rocksdb_dedup_iterator_steps": 0,
+          "rocksdb_dedup_pending_hits": 0,
+          "rocksdb_get_calls": 0,
+          "rocksdb_initialization_write_batches": 1,
+          "rocksdb_iterator_creations": 7,
+          "rocksdb_key_bytes": 3726007,
+          "rocksdb_payload_value_bytes": 15714000,
+          "rocksdb_put_ops": 108007,
+          "rocksdb_range_iterator_steps": 0,
+          "rocksdb_range_read_bytes": 0,
+          "rocksdb_recovery_get_calls": 2,
+          "rocksdb_recovery_iterator_creations": 2,
+          "rocksdb_recovery_payload_bytes": 0,
+          "rocksdb_recovery_payload_rows": 0,
+          "rocksdb_recovery_seek_calls": 2,
+          "rocksdb_seek_calls": 54000,
+          "rocksdb_state_rows": 7,
+          "rocksdb_value_bytes": 17442336,
+          "rocksdb_write_batches": 7,
+          "rocksdb_write_calls": 7,
+          "rocksdb_writebatch_bytes": 21546448,
+          "sink_consumed": 0,
+          "sqlite_prepare_calls": 0,
+          "sqlite_step_calls": 0,
+          "store_digest_bytes": 0,
+          "store_digest_cache_hits": 54000,
+          "store_digest_computed": 0,
+          "store_digest_override_calls": 0,
+          "store_flush_age": 0,
+          "store_flush_bytes": 0,
+          "store_flush_rows": 6,
+          "store_flush_tail": 1,
+          "store_pending_bytes_peak": 2383872,
+          "store_pending_capacity": 8192,
+          "store_pending_records_peak": 8192,
+          "symbol_index_rows": 54000,
+          "time_symbol_index_rows": 0,
+          "transaction_bytes_max": 2383872,
+          "transaction_bytes_min": 1410768,
+          "transaction_bytes_sum": 15714000,
+          "transaction_rows_max": 8192,
+          "transaction_rows_min": 4848,
+          "transaction_rows_sum": 54000,
+          "transactions": 7
+        },
+        "stages": {
+          "consume_checksum": {
+            "count": 53,
+            "max_ns": 481209,
+            "p50_upper_ns": 481209,
+            "p95_upper_ns": 481209,
+            "p99_upper_ns": 481209,
+            "sum_ns": 18881296
+          },
+          "dedup_lookup": {
+            "count": 53,
+            "max_ns": 5042417,
+            "p50_upper_ns": 524287,
+            "p95_upper_ns": 1048575,
+            "p99_upper_ns": 5042417,
+            "sum_ns": 24824418
+          },
+          "deframe_crc": {
+            "count": 373,
+            "max_ns": 1847375,
+            "p50_upper_ns": 1023,
+            "p95_upper_ns": 1847375,
+            "p99_upper_ns": 1847375,
+            "sum_ns": 66948499
+          },
+          "hash_compute": {
+            "count": 53,
+            "max_ns": 1222375,
+            "p50_upper_ns": 262143,
+            "p95_upper_ns": 524287,
+            "p99_upper_ns": 1222375,
+            "sum_ns": 12798041
+          },
+          "hash_queue_oldest_age": {
+            "count": 53,
+            "max_ns": 987792,
+            "p50_upper_ns": 987792,
+            "p95_upper_ns": 987792,
+            "p99_upper_ns": 987792,
+            "sum_ns": 38893251
+          },
+          "json_parse_normalize": {
+            "count": 53,
+            "max_ns": 1735833,
+            "p50_upper_ns": 1735833,
+            "p95_upper_ns": 1735833,
+            "p99_upper_ns": 1735833,
+            "sum_ns": 62326877
+          },
+          "record_encode": {
+            "count": 53,
+            "max_ns": 966125,
+            "p50_upper_ns": 966125,
+            "p95_upper_ns": 966125,
+            "p99_upper_ns": 966125,
+            "sum_ns": 38513705
+          },
+          "redis_build": {
+            "count": 7,
+            "max_ns": 2275416,
+            "p50_upper_ns": 2097151,
+            "p95_upper_ns": 2275416,
+            "p99_upper_ns": 2275416,
+            "sum_ns": 13577999
+          },
+          "redis_cleanup_wait": {
+            "count": 7,
+            "max_ns": 5494375,
+            "p50_upper_ns": 5494375,
+            "p95_upper_ns": 5494375,
+            "p99_upper_ns": 5494375,
+            "sum_ns": 37016417
+          },
+          "redis_decode": {
+            "count": 7,
+            "max_ns": 1222334,
+            "p50_upper_ns": 1048575,
+            "p95_upper_ns": 1222334,
+            "p99_upper_ns": 1222334,
+            "sum_ns": 5892669
+          },
+          "redis_publish_wait": {
+            "count": 7,
+            "max_ns": 9713291,
+            "p50_upper_ns": 8388607,
+            "p95_upper_ns": 9713291,
+            "p99_upper_ns": 9713291,
+            "sum_ns": 57263498
+          },
+          "redis_queue_oldest_age": {
+            "count": 7,
+            "max_ns": 37095292,
+            "p50_upper_ns": 33554431,
+            "p95_upper_ns": 37095292,
+            "p99_upper_ns": 37095292,
+            "sum_ns": 213286667
+          },
+          "redis_read_wait": {
+            "count": 7,
+            "max_ns": 1731209,
+            "p50_upper_ns": 1731209,
+            "p95_upper_ns": 1731209,
+            "p99_upper_ns": 1731209,
+            "sum_ns": 9020376
+          },
+          "rocksdb_batch_prepare": {
+            "count": 7,
+            "max_ns": 11137250,
+            "p50_upper_ns": 11137250,
+            "p95_upper_ns": 11137250,
+            "p99_upper_ns": 11137250,
+            "sum_ns": 62416376
+          },
+          "rocksdb_close": {
+            "count": 1,
+            "max_ns": 377709,
+            "p50_upper_ns": 377709,
+            "p95_upper_ns": 377709,
+            "p99_upper_ns": 377709,
+            "sum_ns": 377709
+          },
+          "rocksdb_finish": {
+            "count": 1,
+            "max_ns": 57090292,
+            "p50_upper_ns": 57090292,
+            "p95_upper_ns": 57090292,
+            "p99_upper_ns": 57090292,
+            "sum_ns": 57090292
+          },
+          "rocksdb_flush": {
+            "count": 1,
+            "max_ns": 51070958,
+            "p50_upper_ns": 51070958,
+            "p95_upper_ns": 51070958,
+            "p99_upper_ns": 51070958,
+            "sum_ns": 51070958
+          },
+          "rocksdb_recover_validate": {
+            "count": 1,
+            "max_ns": 11292,
+            "p50_upper_ns": 11292,
+            "p95_upper_ns": 11292,
+            "p99_upper_ns": 11292,
+            "sum_ns": 11292
+          },
+          "rocksdb_reopen_readonly": {
+            "count": 1,
+            "max_ns": 498417,
+            "p50_upper_ns": 498417,
+            "p95_upper_ns": 498417,
+            "p99_upper_ns": 498417,
+            "sum_ns": 498417
+          },
+          "rocksdb_sync_wal": {
+            "count": 1,
+            "max_ns": 4737167,
+            "p50_upper_ns": 4737167,
+            "p95_upper_ns": 4737167,
+            "p99_upper_ns": 4737167,
+            "sum_ns": 4737167
+          },
+          "rocksdb_wait_compact": {
+            "count": 1,
+            "max_ns": 362416,
+            "p50_upper_ns": 362416,
+            "p95_upper_ns": 362416,
+            "p99_upper_ns": 362416,
+            "sum_ns": 362416
+          },
+          "rocksdb_write": {
+            "count": 7,
+            "max_ns": 13581584,
+            "p50_upper_ns": 13581584,
+            "p95_upper_ns": 13581584,
+            "p99_upper_ns": 13581584,
+            "sum_ns": 85411667
+          },
+          "store_complete_oldest_age": {
+            "count": 7,
+            "max_ns": 77320542,
+            "p50_upper_ns": 77320542,
+            "p95_upper_ns": 77320542,
+            "p99_upper_ns": 77320542,
+            "sum_ns": 499104375
+          },
+          "store_queue_oldest_age": {
+            "count": 7,
+            "max_ns": 58944375,
+            "p50_upper_ns": 58944375,
+            "p95_upper_ns": 58944375,
+            "p99_upper_ns": 58944375,
+            "sum_ns": 345139083
+          },
+          "store_total": {
+            "count": 7,
+            "max_ns": 25646792,
+            "p50_upper_ns": 25646792,
+            "p95_upper_ns": 25646792,
+            "p99_upper_ns": 25646792,
+            "sum_ns": 153962624
+          },
+          "store_validate": {
+            "count": 7,
+            "max_ns": 203584,
+            "p50_upper_ns": 131071,
+            "p95_upper_ns": 203584,
+            "p99_upper_ns": 203584,
+            "sum_ns": 724334
+          }
+        }
+      },
+      "full_path_store": {
+        "backend": "rocksdb",
+        "backend_lookup_metric_scope": "workload only, excluding recovery/export; lookup_calls counts persisted digest-prefix candidate Seeks (one per distinct digest per batch); candidates counts persisted payload rows returned for C++ exact comparison; pending hits are separately counted by rocksdb_dedup_pending_hits",
+        "batch_metadata_rows": 0,
+        "counters": {
+          "attempted": 54000,
+          "ignored": 0,
+          "inserted": 54000,
+          "transactions": 7
+        },
+        "database": "/tmp/tickshelf-ablation-20261117.UYJcYD/truth-final-rocks-54k-v2/cases/p1h1d1r1s1-r1-841f42d86c0f44589d19205a1e660dd7/full-record-rocksdb-v1",
+        "deduplication": "nonunique fixed32 SHA-256 prefix candidates, exact full canonical byte equality only; pending batch cache",
+        "digest_cache_contract": "shared store_digest; trusted EncodedRecord SHA256 only while bytes unchanged; test override takes precedence",
+        "durability_scope": "synchronous WAL atomic WriteBatch with OS sync; no physical power-loss or hardware PLP claim",
+        "durable": true,
+        "hardware_plp": "unknown",
+        "heavy_equivalence": "logical per-record time/symbol secondary index and attempted/inserted/ignored/bytes batch metadata; Rocks KV and SQLite B-tree layouts/physical costs are not identical; no segment CRC substitute",
+        "input_validation": "same trusted-codec canonical header/64MiB batch boundary as SQLite; recovery fully decodes all payloads and validates both directions of every index",
+        "payload_location": "RocksDB D values contain complete canonical records; no external segment files",
+        "persisted_count_scope": "strictly verified recovery state plus acknowledged atomic batches; null when poisoned because write status may have an uncertain commit outcome",
+        "persisted_counts": {
+          "attempted": 54000,
+          "canonical_bytes": 15714000,
+          "ignored": 0,
+          "inserted": 54000,
+          "transactions": 7,
+          "unique_payload_bytes": 15714000
+        },
+        "physical_duplicate_rows": 0,
+        "physical_key_rows": 108002,
+        "physical_power_loss_tested": false,
+        "physical_rows": 54000,
+        "rocksdb": {
+          "api_count_scope": "logical library operations, not syscalls; successful workload batch Put/key/value bytes exclude startup stamp/state; dedup and range iterators reused per operation; recovery has separate Get/iterator counters",
+          "background_state": {
+            "rocksdb.background-errors": 0,
+            "rocksdb.block-cache-capacity": 33554432,
+            "rocksdb.block-cache-pinned-usage": 64,
+            "rocksdb.block-cache-usage": 4096,
+            "rocksdb.compaction-pending": 0,
+            "rocksdb.cur-size-all-mem-tables": 2048,
+            "rocksdb.estimate-live-data-size": 21827962,
+            "rocksdb.estimate-pending-compaction-bytes": 0,
+            "rocksdb.live-sst-files-size": 21827962,
+            "rocksdb.mem-table-flush-pending": 0,
+            "rocksdb.num-immutable-mem-table": 0,
+            "rocksdb.num-running-compactions": 0,
+            "rocksdb.num-running-flushes": 0,
+            "rocksdb.total-sst-files-size": 21827962
+          },
+          "build_properties": {
+            "rocksdb_build_date": "2026-10-28 15:47:22",
+            "rocksdb_build_git_sha": "17b624b5c0d41bd42db5cf88aa867f3b26eaf1fa",
+            "rocksdb_build_git_tag": "v11.13.2"
+          },
+          "debt_after_flush": {
+            "rocksdb.background-errors": 0,
+            "rocksdb.block-cache-capacity": 33554432,
+            "rocksdb.block-cache-pinned-usage": 64,
+            "rocksdb.block-cache-usage": 4096,
+            "rocksdb.compaction-pending": 0,
+            "rocksdb.cur-size-all-mem-tables": 2048,
+            "rocksdb.estimate-live-data-size": 21827962,
+            "rocksdb.estimate-pending-compaction-bytes": 0,
+            "rocksdb.live-sst-files-size": 21827962,
+            "rocksdb.mem-table-flush-pending": 0,
+            "rocksdb.num-immutable-mem-table": 0,
+            "rocksdb.num-running-compactions": 0,
+            "rocksdb.num-running-flushes": 1,
+            "rocksdb.total-sst-files-size": 21827962
+          },
+          "debt_after_wait_compact": {
+            "rocksdb.background-errors": 0,
+            "rocksdb.block-cache-capacity": 33554432,
+            "rocksdb.block-cache-pinned-usage": 64,
+            "rocksdb.block-cache-usage": 4096,
+            "rocksdb.compaction-pending": 0,
+            "rocksdb.cur-size-all-mem-tables": 2048,
+            "rocksdb.estimate-live-data-size": 21827962,
+            "rocksdb.estimate-pending-compaction-bytes": 0,
+            "rocksdb.live-sst-files-size": 21827962,
+            "rocksdb.mem-table-flush-pending": 0,
+            "rocksdb.num-immutable-mem-table": 0,
+            "rocksdb.num-running-compactions": 0,
+            "rocksdb.num-running-flushes": 0,
+            "rocksdb.total-sst-files-size": 21827962
+          },
+          "debt_after_writes": {
+            "rocksdb.background-errors": 0,
+            "rocksdb.block-cache-capacity": 33554432,
+            "rocksdb.block-cache-pinned-usage": 64,
+            "rocksdb.block-cache-usage": 4096,
+            "rocksdb.compaction-pending": 0,
+            "rocksdb.cur-size-all-mem-tables": 24119296,
+            "rocksdb.estimate-live-data-size": 0,
+            "rocksdb.estimate-pending-compaction-bytes": 0,
+            "rocksdb.live-sst-files-size": 0,
+            "rocksdb.mem-table-flush-pending": 0,
+            "rocksdb.num-immutable-mem-table": 0,
+            "rocksdb.num-running-compactions": 0,
+            "rocksdb.num-running-flushes": 0,
+            "rocksdb.total-sst-files-size": 0
+          },
+          "finish_background_state": {
+            "rocksdb.background-errors": 0,
+            "rocksdb.block-cache-capacity": 33554432,
+            "rocksdb.block-cache-pinned-usage": 64,
+            "rocksdb.block-cache-usage": 4096,
+            "rocksdb.compaction-pending": 0,
+            "rocksdb.cur-size-all-mem-tables": 2048,
+            "rocksdb.estimate-live-data-size": 21827962,
+            "rocksdb.estimate-pending-compaction-bytes": 0,
+            "rocksdb.live-sst-files-size": 21827962,
+            "rocksdb.mem-table-flush-pending": 0,
+            "rocksdb.num-immutable-mem-table": 0,
+            "rocksdb.num-running-compactions": 0,
+            "rocksdb.num-running-flushes": 0,
+            "rocksdb.total-sst-files-size": 21827962
+          },
+          "finish_called": true,
+          "finish_contract": "Flush(wait), WaitForCompact(flush,wait_for_purge), SyncWAL, Close/delete, read-only reopen all timed inside finish; export does not write or repair",
+          "format_stamp": "tickshelf-bench/full-record-rocksdb/v1/RCD1/light",
+          "logical_api_counts": {
+            "rocksdb_get_calls": 0,
+            "rocksdb_iterator_creations": 7,
+            "rocksdb_put_ops": 108007,
+            "rocksdb_seek_calls": 54000,
+            "rocksdb_write_batches": 7,
+            "rocksdb_write_calls": 7
+          },
+          "options": {
+            "allow_mmap_writes": false,
+            "block_cache_capacity": 33554432,
+            "block_cache_pinned_usage": 64,
+            "block_cache_usage": 4096,
+            "block_size": 4096,
+            "bloom_bits_per_key": 10,
+            "bottommost_compression": "none",
+            "compression": "none",
+            "dedup_read_options": {
+              "prefix_same_as_start": true,
+              "total_order_seek": false
+            },
+            "digest_prefix_bytes": 33,
+            "disable_auto_compactions": false,
+            "filter_policy": "bloomfilter",
+            "manual_wal_flush": false,
+            "max_background_jobs": 2,
+            "max_write_buffer_number": 2,
+            "memtable_prefix_bloom_size_ratio": 0,
+            "min_write_buffer_number_to_merge": 1,
+            "no_block_cache": false,
+            "option_policy": "library cache/memtable defaults; explicit sync/checksum/recovery/no-compression plus capped33 prefix and 10-bit/key Bloom; actual memory including Bloom is not claimed equal to SQLite cache budget",
+            "other_read_options": {
+              "prefix_same_as_start": false,
+              "total_order_seek": true
+            },
+            "paranoid_checks": true,
+            "prefix_extractor": "rocksdb.CappedPrefix",
+            "table_factory": "BlockBasedTable",
+            "wal_recovery_mode": "absolute_consistency",
+            "whole_key_filtering": true,
+            "write_buffer_size": 67108864
+          },
+          "poisoned": false,
+          "sync_source": "POSIX use_fsync=true; macOS HAVE_FULLFSYNC builds select fcntl(F_FULLFSYNC), otherwise fsync; build capability is not inferred from use_fsync",
+          "version": "11.13.2",
+          "write_options": {
+            "disableWAL": false,
+            "sync": true,
+            "use_fsync": true
+          }
+        },
+        "schema_cost": "per unique record: D digest/id -> full payload and R symbol/time/id -> digest; one S state replacement per nonempty batch",
+        "store_lookup": "exact",
+        "symbol_index_rows": 54000,
+        "sync_method": "RocksDB WAL sync=true,use_fsync=true",
+        "time_encoding": "uint64 big-endian 8-byte; length-prefixed binary symbols",
+        "time_symbol_index_rows": 0,
+        "transaction_model": "light",
+        "writer_model": "one DB writer handle; mutex covers dedup read through synchronous WriteBatch; DB LOCK rejects independent writers; not TransactionDB or multi-writer transactions"
+      },
+      "hardware": "hw.model: Mac14,9\nhw.memsize: 17179869184\nhw.ncpu: 12\nhw.physicalcpu: 12\n",
+      "input": {
+        "bytes": 24220218,
+        "canonical_bytes": 15714000,
+        "checksum_all": "b0a8a79f6ce86dd3",
+        "checksum_unique": "b0a8a79f6ce86dd3",
+        "coverage": {
+          "all_records_full_five_level_baseline": true,
+          "full_five_level_baseline_records": 54000,
+          "observed_symbols": 5400,
+          "records": 54000
+        },
+        "generator": "independent-python-record.hpp-formula",
+        "input": "json",
+        "path": "/private/tmp/tickshelf-ablation-20261117.UYJcYD/truth-final-rocks-54k-v2/inputs/input-47fa615c9e454c3687e53b61fcecaae7.iqb",
+        "raw_payload_bytes": 24218922,
+        "records": 54000,
+        "sha256": "7ced3afc37962660491a5e1aaadf62da837de11362260f069c0ad9c86000bb21",
+        "source": {
+          "authorized": false,
+          "kind": "synthetic",
+          "provenance": "deterministic record.hpp formula, not production capture"
+        },
+        "source_mode": "file_replay",
+        "unique_records": 54000
+      },
+      "invalid_rows": 8,
+      "measured_source_sha256": {
+        "CMakeLists.txt": "cdb45eaa00f90358ee63d96dc5ebc814d13a366ab1072696b9c935dcb31a1b1d",
+        "bench/config.cpp": "11ffa449051e1784a639784df58e6a2ea83350b183e619bc467289bbf04bc475",
+        "bench/config.hpp": "98417e60f2422fee1a5d87835523ee3a4a1b3b39250fc005340156512ec0a2f1",
+        "bench/engine_ablation.cpp": "cb774f043a85d3576d98b1019c90542d7e2b971f8a92fa5fa367efec40e40033",
+        "bench/hash.cpp": "ae69ca8f8d0518b86b842c9e063f47a20e714c1b8a0332c17adcc8f619f49d9a",
+        "bench/hash.hpp": "dfb6bbcd01df58e278edd843cbe993043a069d5625d62e91daec5837eddc7df2",
+        "bench/main.cpp": "ad5010b11f6421fc520f52588fe3f08ba58062529e3749fde66c7a44f40a3859",
+        "bench/metrics.hpp": "893f790f96e856a9b3fa8f50efb534dd955c45258002fefbde553e16a0884c13",
+        "bench/pipeline.cpp": "91f83c7aa74e83cead996b6c9053110d16f95ae37b29356fc6f2822903a40cdd",
+        "bench/pipeline.hpp": "221567a964cb3efea1efc7d17179023cecda3731a1be39aaf1c16012bfba2d41",
+        "bench/protocol.cpp": "f3def92aa43298765e2add920efc402710a62ca79aadf587312447096e3bd66e",
+        "bench/protocol.hpp": "a47a9d0fedf10c22605d738836d04ab2d9e0d2e2403d17b3b48c825bffc1c886",
+        "bench/record.cpp": "b83ab1cda8aa719ca050e2746d5a2b03358319a5f61784e4edab79931a0669fb",
+        "bench/record.hpp": "01b421a770bfaec7d36d80d796ba37bdae05b6fb8d6bf6d19ed2a247bf6add0a",
+        "bench/rocks_record_store.cpp": "dcbb77a4fdf24d947f89d3772ef0ee8da0f35874903d8b5e6a9e96a61b65c8b5",
+        "bench/rocks_record_store.hpp": "0a699761b6ac4dc5f0763f01a403b3a0f92df88e5ce1f4050cc28c201598542c",
+        "bench/rocks_reference.cpp": "b7b6fbc6c1f00ee315de0dbc69abb6117a10cfd9e6719f5a2d5dccea439b3e55",
+        "bench/sqlite_probe.cpp": "48def30855d943d4c2cec8c1a7180f646dc128732796447ad8b5acb98aad8d09",
+        "bench/store.cpp": "2e72425ecef341035647f9b79bc0c29410fffc70662d6626aaaa8639680bdc07",
+        "bench/store.hpp": "2018c63ebbd41edc63c16fd79fe8b5b1f366286e38d848186fd9b447a8bd3955",
+        "scripts/pipeline_bench.py": "ac17adef15ca1eaa3fc03e421201f0df8eef3a4643d1b831d26fd7e788eecc13",
+        "scripts/pipeline_bench_anomaly.py": "79cdae67b7785be2eacd53e8e1d114fb500f8ccaa51f9b3595b4c6fa3f186b3d",
+        "scripts/pipeline_bench_capture.py": "669385240750e01a8e0725a86bfd11d4738fa4b8d7a6d829b1a246ef293a94b6",
+        "scripts/pipeline_bench_processes.py": "b7f587d84813f6f33b86266c57bdf3fb646034e2c6dc5286d4bb329b3616bd2d",
+        "scripts/pipeline_bench_support.py": "b0c670c117f180d0ae0381668621a9c49ebacf4f800e247c6faf56fc4ad7ab9b",
+        "scripts/pipeline_bench_syscalls.py": "e1ab97d9c1360fce76e06172f36b31a13eb0f3550312d1fb2c8820f746d1f1a3",
+        "scripts/pipeline_bench_truth.py": "63750e99d7080c4c69ee27268dae2be5a96db22cbadfb0ccbcd4141893bdf40a",
+        "scripts/stack_runtime.py": "3115d0464536d18f32f41a7baac24c01daaa60b38cb4e70dd6aab36a9f0e3501",
+        "scripts/test_pipeline_bench.py": "3fe393066f03d59641939e2040547d82c2c23912889d4cb0463fee6c46d4d047",
+        "scripts/test_pipeline_bench_anomaly.py": "a7c926c1d94fe892ea3351542eb5f93b44e006eba5cdb2eca056bacb50b4b197",
+        "scripts/test_pipeline_bench_capacity.py": "6c969f36cf2d0aa8376f6d039e48fa6e8d5665568e971d180f4ad5e4d876ada0",
+        "scripts/test_pipeline_bench_capture.py": "fec10e4cc3cd10f0f42ac5c6de0da19081e152e06b5679a2adde16e3f9548e09",
+        "scripts/test_pipeline_bench_processes.py": "3adf415315f8f4c66ad60f65b8be171ba67a524cce23ec365f17408a3db1eaed",
+        "scripts/test_pipeline_bench_qualification.py": "458dfe18c6b905490774f2382748af380dc239c44968f9f0ed11c0d366512a77",
+        "scripts/test_pipeline_bench_source.py": "c6392a6b9e233b1dbea30619e7b815aa21b9de6fbefc8d067366455ce9909e2b",
+        "scripts/test_pipeline_bench_syscalls.py": "bf96dca5543ddaae66f61c0846148e324180b40401f087bdf1aa63847c9527fc",
+        "scripts/test_pipeline_bench_truth.py": "cb12e2761c18435fe42d6cd6852c76eba66b9289499074e252b3be6206c01e00",
+        "src/apps/capacity/main.cpp": "2e9b1d84a71406e4583e2484f4dc74daee752bd4fbc483bd17b1c3fe74a55f53",
+        "src/apps/evictor/main.cpp": "714d5d39072a16ec8d22fdd1d15ad0df5b9d91d7eb590879685849a57ccbda16",
+        "src/apps/feedgen/main.cpp": "5dbec6f631cc2e7cc4d0c65cd50b0e93b6d69c110f259a6c476bf6fc786e00d3",
+        "src/apps/floodgen/main.cpp": "6827dff9f0f49807fa4b7a3638604d7c29217a419289ddb540a63946b5c53e9b",
+        "src/apps/persister/main.cpp": "70c87236792d81d90f6c171080dcde0eabd44909d4ad7d8a80c8a00672ed3aa7",
+        "src/apps/queryd/main.cpp": "198750ff308fb3377d98244abecdeb8110331406a30d40d6e656cbc6d0ba6308",
+        "src/apps/tickshelfd/main.cpp": "02d5c53a564f5c92c3bf4847ff0973b1e3f6470f606a132de069bd4aa25c4ded",
+        "src/common/civil.cpp": "a50044fdd62de986819f56c2f341f24db4df0792fa095a07d35454680b2257ce",
+        "src/common/civil.hpp": "05dd5c46debb83e21686ac71e856de006d0d9ce4ed8f647259a7cb93bee4c999",
+        "src/common/crc32.cpp": "3ea3b072df68a787252c9c8be6042c9d9a89bdb8117f5da172509de0db36de16",
+        "src/common/crc32.hpp": "c88f5553fc273f8685397184daa1f7fb108aecf1cecb6f62b251fbd5ce4a3ae0",
+        "src/common/endian.hpp": "a3d822783f26f4dcfc42782aba327b9e7ab3c6406d5ae66eb884216e40cf9bb5",
+        "src/common/fixed.hpp": "9b38aaac2f764b25de86e706463107d8f157ab9b4609dc3a852f8f1b02e81495",
+        "src/common/frame_writer.hpp": "dfa2bc67f482b28e57880d5a631b39f3ea6eddb470b0e4152e001cfeaa0cba78",
+        "src/common/net.cpp": "ee807f5858b782c9875210765168a25908d6a81cbae5bdea1cb192a9f4e1c421",
+        "src/common/net.hpp": "c605020adeb1f718829e5e189099864a667e54369344eb00a57b8c36d07af4d0",
+        "src/common/startup_config.cpp": "03ca59b0c9da9dd25cd0dc550beba820ed89cce525aae9070039aa73f63de6f4",
+        "src/common/startup_config.hpp": "ee8d9be8635afd16bcfc89416e5ddeed999bbeffa3c31ddb64b2b08de6c40729",
+        "src/common/tick.cpp": "b30112c7ec62c72478446050e873f5210692efcd3836df5e3b93f2b7b89a060d",
+        "src/common/tick.hpp": "c276807c9615cf47fbcc7da202058f30fbc561e38a48d32b9974e4e18ddf45b8",
+        "src/components/coverage/coverage_ledger.hpp": "01bc76465e26da6cd22d8a198155af08b519fd3b5565be7e8036b1fd3adb6637",
+        "src/components/coverage/interval_set.hpp": "e23bf48f6209c8741e75ae7841669605338248f872af779113e0a35ab3bce4b7",
+        "src/components/engine/bounded_queue.hpp": "4a9c6e07ea519b8924fa451f754eb58bcfb26bf6a1d9721c24e69a5995a18f2c",
+        "src/components/engine/dedupe.cpp": "13a6c5f7f90363f3b8470b250a826161c69b1010c1205f910f8f6a9e2254b591",
+        "src/components/engine/dedupe.hpp": "43b4eef509f8a5d5f74d8ba052b548edb9a940f2fee981a121422876716e212f",
+        "src/components/engine/engine.cpp": "0d25205a9d819b2f270d29f58d15adec63887dce50d91d010e03b98970dbcdb2",
+        "src/components/engine/engine.hpp": "50a66ab747a2d2514aa137793aca30917b5f3263b6754ccc1f40d3149073ef21",
+        "src/components/engine/slice.hpp": "378f7ac1f859da9d75e03fc598565ba130f3aeca3a477fa8959c76bf53e989ae",
+        "src/components/engine/write_policy.hpp": "e7919d85b49790275ab442d3bd5147df71a42eb0b05007b6e293a7037d4f5990",
+        "src/components/evict/evictor.cpp": "fe82a67b2b26eff83092b251009c8f321f661f909cd806acf4d02b4d9a3420aa",
+        "src/components/evict/evictor.hpp": "375b00d1cf9025d229913d1dc58ff37cf63a8d9299eae6d8811ce506b68c4da2",
+        "src/components/ingest/frame_parser.cpp": "b6f8657c175875c18080ecc74cb81762f93e91ec4c65263d71f838273f7220cd",
+        "src/components/ingest/frame_parser.hpp": "6fdeb50a33c9c3b4369a81eae3f152b081b9c2987dd411b82bd051ee18f5fb6b",
+        "src/components/ingest/ingestor.cpp": "3bf58d692d0d39644679cc49cdc4b78f05bff4b60c6616c7fb03102850294827",
+        "src/components/ingest/ingestor.hpp": "72193ff4ed510e8fd33a8d3f70585c821524bf7ff6b578ad476ed4a4a9c8a18c",
+        "src/components/lease/lease_persister.cpp": "abe5035a39e1143dd861a614ace2e80db42b9df5f2c35e186c4751cc10a6ac2a",
+        "src/components/lease/lease_persister.hpp": "7c23d79a3f4f47dcd52861f1068e4613e0a132353072e3d2ad33383f9de129ea",
+        "src/components/query/reader.cpp": "d60c678ef02c208878261c1a8df21993d93042340c9d98c06513bddca4bf25eb",
+        "src/components/query/reader.hpp": "0bf2767eb3f9aba3d18f2691bc8a8d12c996fc9d67bb0016b47e4a2ddc6b40b0",
+        "src/components/redis/redis_shard_pool.cpp": "995fa5459a5c7428445a4bcdc85a355a5bca937daee03966ea5aed8862562ae9",
+        "src/components/redis/redis_shard_pool.hpp": "2def66e9cff8f2ebdd63b3620520a7f3bbe249d367c02940455fed15dd87cd96",
+        "src/components/redis/resp_client.cpp": "f7ddce6e96fa5b3d3c79b982d98bc51277911116b06aaccdd8ba5b782d9c9aaa",
+        "src/components/redis/resp_client.hpp": "d76314aa4c4582d9bd0fdbdd91c16fd56e08dfe8da3a2c8cfa915478bf3ae6ca",
+        "src/components/storage/shard_route.cpp": "28fd4938ad1cb004d9a9e8ad6e8c5ba659a60b535ed31366da36b0339387a4b2",
+        "src/components/storage/shard_route.hpp": "7f12f25deaae4ef98fe5a4d0d327c2c153488e92cb60d858ba45275fb9cc0842",
+        "src/components/storage/sharded_store.cpp": "b189b2d1fce3dbd0a23df03cc5c1f3f68d07ed8c99a5a5d9638b9158a8fadc1a",
+        "src/components/storage/sharded_store.hpp": "54626ed04f6bed2cd02c073f668c8c80d2af563251fb825cf7f1d56b30372e51",
+        "src/components/storage/sqlite_store.cpp": "5417ebbd279cfa9956e24e5593d7c8375c10e85516b8cfb2552d1b118bfed3ff",
+        "src/components/storage/sqlite_store.hpp": "9309a5c73a00e781ee5272a884d1f3d24f7a498a12ef29cc7da1d4077b53e655",
+        "src/components/storage/storage_shard_pool.cpp": "06e6b72ce20cca38ba05091060e9fcb20c1b0bbc6af2e7ebf553896477795ff6",
+        "src/components/storage/storage_shard_pool.hpp": "0f75638dac4112b26d53e94cba5700b8870f62eff85d497e21bcd9e3c0721e61",
+        "src/components/storage/tick_store.hpp": "061738fb29a14e437eb014e747527290d67ef74632d42a6afb6342022b28d552"
+      },
+      "platform": "macOS-15.8.1-arm64-arm-64bit-Mach-O",
+      "public_artifacts": {
+        "csv": {
+          "path": "ablation-truth-rocks-20261117.csv",
+          "sha256": "4e95ef13080421983dfb7b3f915dede6418e680471ee86405fd405adefb659cb"
+        },
+        "json": {
+          "path": "ablation-truth-rocks-20261117.json",
+          "sha256": "6bd42c60d70723719dc5c747b08f4797ea867e917e2443765085fa42bc76fe57"
+        },
+        "md": {
+          "path": "ablation-truth-rocks-20261117.md",
+          "sha256": "63c15daabb32cd522e44d1dc50e7746d0b95b54aaf4aeaca1bfaa8d81ee71472"
+        }
+      },
+      "summary_sha256": "7217bc854fbceee7016704514126305a80da77e41eadc1924cd2604ad135a70d"
+    }
+  },
+  "uncommitted_changes": true,
+  "validation": {
+    "asan_ubsan_bench": {
+      "assertions": 106283,
+      "passed_cases": 95
+    },
+    "asan_ubsan_offline": {
+      "assertions": 35005,
+      "excluded_shared_redis_cases": 8,
+      "passed_cases": 102
+    },
+    "asan_ubsan_private_engine_runtime": {
+      "passed": 6
+    },
+    "asan_ubsan_engine_runner_and_native_smoke": {
+      "passed": 11,
+      "log_path": "/tmp/tickshelf-ablation-20261117.UYJcYD/validation-asan-engine-native.log",
+      "log_sha256": "80f6acec794d273e3f34ddeaf2d5c25f4826facee23a28300c3c39afa9c17b2c"
+    },
+    "caveats": [
+      "ASan leak detection disabled on this platform; no leak-clean claim",
+      "Pinned RocksDB and system dependencies are not sanitizer-instrumented",
+      "Shared Redis integration cases excluded, not treated as passed",
+      "Initial Python pipeline invocation had 29 skips; a subsequent actual-build run passed all 39",
+      "One expected argparse rejection verifies refusal to overwrite an existing output directory"
+    ],
+    "debug_bench": {
+      "assertions": 106283,
+      "passed_cases": 95
+    },
+    "debug_offline": {
+      "assertions": 35005,
+      "excluded_shared_redis_cases": 8,
+      "passed_cases": 102
+    },
+    "logs": [
+      {
+        "path": "/tmp/tickshelf-ablation-20261117.UYJcYD/validation-debug-asan-tsan.log",
+        "sha256": "93e2d33474ef79102fd52f57f9f237c1a2e00173a6f6a61dbdff41d16e031df8"
+      },
+      {
+        "path": "/tmp/tickshelf-ablation-20261117.UYJcYD/validation-python-final.log",
+        "sha256": "1fe16db76f9e955a2a451068947dd7044f7ef211c51c37c5ec71203dba62069f"
+      },
+      {
+        "path": "/tmp/tickshelf-ablation-20261117.UYJcYD/validation-pipeline-full.log",
+        "sha256": "a4ba572605a225a5c9a8cdb4df3de331666578fb482f74e5044111f9bc40f800"
+      }
+    ],
+    "python_engine_bench": {
+      "passed": 11
+    },
+    "python_pipeline_with_actual_build": {
+      "passed": 39,
+      "skipped": 0
+    },
+    "python_private_engine_runtime": {
+      "passed": 6
+    },
+    "python_redis_snapshot_including_private": {
+      "passed": 11
+    },
+    "python_truth": {
+      "passed": 22
+    },
+    "tsan_engine_queue_dedupe": {
+      "assertions": 1345,
+      "passed_cases": 23,
+      "scope_filtered_other_cases": 87
+    },
+    "tsan_private_engine_runtime": {
+      "passed": 6
+    }
+  }
+}

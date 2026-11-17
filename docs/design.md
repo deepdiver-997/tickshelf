@@ -246,6 +246,13 @@
 - **决定**：`WriteMode::StorageOnly`（`--persist storage`，必须 `--engine on`）：Engine 不建 Redis 端口、不发布、不租约仲裁、无 finish；worker 把整片直接交给 `StorageShard`。`committed_input`/`inserted_unique`/`degraded`/`sink_consumed` 与写穿同义；没有 `published`/`skipped`/`finish_pending`。daemon 在此模式跳过 ADR-013 负载键发布（无意义重连也不做），退出检查 `storage_complete`。
 - **边界**：没有租约仲裁——多写者同库只有存储唯一键幂等兜底；不写 `state` HASH，persister/淘汰对这批数据无可处理对象（数据已直接落库）。这不是"更耐久"或"更快"的一般承诺，只是少做了发布义务的口径；交付合同不变（最终提交前允许丢失，Storage 同步强度依实际配置）。
 
+## ADR-027 单机 raw journal：本体先于索引，水位是恢复提示（2026-11-18）
+
+- **背景**：StorageOnly 路径没有 Redis 副本，"最终提交前允许丢失"的窗口即每次 Storage 提交前的全部在途数据；索引提交本身也缺一个可重放的本地权威。
+- **决定**：`RawJournalShard`（StorageShard 装饰器）：每批先追加 raw 帧（`u32 count + u64 seq_first + 64B ticks`，版本戳文件头）并 `F_FULLFSYNC`/`fsync`，**之后**才调用内层 Storage 提交；raw 追加失败则索引绝不提交。索引提交失败 → raw 已留痕，下次 open 重放（幂等 upsert）补齐。水位文件 `<shard>.raw.wm` 经临时文件+fsync+rename+目录 fsync 原子落盘，open 时钉住、此后每 32 次提交摊销——它是**恢复游标不是耐久承诺**：落后无害（多重放一段），超前即违约。撕裂尾部（崩溃半帧）在 open 时按最后完整帧边界截断并计数；水位之后不足整帧的尾部按幂等重放。
+- **拒绝的替代**：查询时 digest 校验兜底（把静默损坏升级为可检测丢失，但违反"提交后不允许错误"）；先提交索引再补 raw（顺序颠倒使第三象限成立）；每批一次水位落盘（多一次 fsync，收益只是重放更短）。
+- **边界**：仅限 `--engine --persist storage --raw-journal` 单写者路径；写穿以 Redis 租约为恢复权威不叠加。raw 同步不是跨资源事务，故障窗口语义见 [delivery-contract §4.1](delivery-contract.md)。macOS fsync 的 barrier 语义不做断言，能探测到 F_FULLFSYNC 时使用之。分布式拓扑的 raw 所有权与水位语义在合同 §8 声明为边界，不实现。
+
 ## 数据模型（Redis）
 
 - ~~行情键 `ts:{symbol}:{yyyymmdd}`（v1 逐 tick ZSET，member=64B Tick 原始字节）~~ — ADR-017 起退役（dev 期 flag-day 换段式；生产期格式迁移走 ADR-018 双读配方）

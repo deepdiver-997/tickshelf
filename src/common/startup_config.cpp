@@ -57,6 +57,8 @@ const Spec kSchema[] = {
      &Options::flush_interval_ms, "MS", 1, kMaxIntervalMs},
     {"tickshelfd", "persist", "--persist", "persist", kDaemon, &Options::persist, "none|sqlite|storage"},
     {"tickshelfd", "engine", "--engine", "engine", kDaemon, &Options::engine, nullptr},
+    {"tickshelfd", "raw_journal", "--raw-journal", "raw_journal", kDaemon, &Options::raw_journal,
+     nullptr},
     {"tickshelfd", "engine_batch_records", "--engine-batch-records", "engine_batch_records", kDaemon,
      &Options::engine_batch_records, "N", 1},
     {"tickshelfd", "engine_batch_bytes", "--engine-batch-bytes", "engine_batch_bytes", kDaemon,

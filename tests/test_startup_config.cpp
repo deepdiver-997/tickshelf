@@ -465,7 +465,7 @@ TEST_CASE("startup_config: malformed syntax strings and unsupported escapes fail
 
 TEST_CASE("startup_config: exact JSON contracts use native numbers booleans and escaped strings") {
     CHECK(to_json(Component::Tickshelfd, parse(Component::Tickshelfd, {}).options) ==
-          R"({"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"bind":"127.0.0.1","port":9900,"flush_interval_ms":500,"persist":"none","engine":false,"engine_batch_records":8192,"engine_batch_bytes":4194304,"engine_batch_ms":100,"engine_inflight":8,"engine_dedup":false,"engine_dedup_bytes":268435456,"engine_retry_ms":50,"engine_max_pending_records":65536,"engine_lease_ttl_s":60,"engine_shutdown_ms":10000})");
+          R"({"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"bind":"127.0.0.1","port":9900,"flush_interval_ms":500,"persist":"none","engine":false,"raw_journal":false,"engine_batch_records":8192,"engine_batch_bytes":4194304,"engine_batch_ms":100,"engine_inflight":8,"engine_dedup":false,"engine_dedup_bytes":268435456,"engine_retry_ms":50,"engine_max_pending_records":65536,"engine_lease_ttl_s":60,"engine_shutdown_ms":10000})");
     CHECK(to_json(Component::Persister, parse(Component::Persister, {}).options) ==
           R"({"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"worker":"persister","poll_ms":1000,"once":false})");
     CHECK(to_json(Component::Evictor, parse(Component::Evictor, {"--soft-watermark-bytes", "1"}).options) ==

@@ -20,6 +20,7 @@ struct Options {
     std::string persist = "none";
     // 分片持久化引擎（ADR-023）；默认 off，旧 flush 路径逐字节不变。
     bool engine = false;
+    bool raw_journal = false;  // ADR-027：StorageOnly 直落存储的本体先行日志（engine+storage 才可用）
     std::uint64_t engine_batch_records = 8192;
     std::uint64_t engine_batch_bytes = 4ull << 20;
     std::uint64_t engine_batch_ms = 100;

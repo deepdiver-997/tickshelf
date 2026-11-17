@@ -235,6 +235,47 @@ class EngineRuntimeTests(unittest.TestCase):
         self.assertEqual(child.wait(timeout=5), 1, self.processes.text("reject"))
         self.assertIn("--persist storage requires --engine", self.processes.text("reject"))
 
+    def test_raw_journal_replay_is_idempotent_across_restart(self):
+        # ADR-027 端到端：storage + raw journal。水位只在 open 与每 32 次提交落盘，
+        # 正常重启时它天然滞后 → 重放按幂等 upsert 补齐既有行（inserted=0），
+        # 行数与内容不变，随后可继续写入扩展到 96 行。
+        unused_port, = candidate_ports(1)
+        text = self.config.read_text().replace("persist = sqlite", "persist = storage")
+        text = text.replace(f"port = {self.redis_port}", f"port = {unused_port}", 1)
+        text = text.replace("engine = true", "engine = true\nraw_journal = true")
+        self.config.write_text(text)
+        self.start_daemon()
+        manifest = write_input(self.directory / "rawjournal.ticks", 64, 8, 0)
+        send_ticks(self.daemon_port, [tick_bytes(i, 8) for i in range(64)])
+        wait_until(lambda: db_rows(self.db, self.shards) == (64, 64), timeout=10,
+                   description="raw journal baseline committed",
+                   processes=self.processes, names=("tickshelfd",))
+        self.assertEqual(self.processes.stop("tickshelfd", timeout=10), 0)
+        for shard in range(self.shards):
+            self.assertTrue(Path(f"{self.db}.{shard}.raw").is_file())
+
+        # 重启：新 OwnedProcesses（日志文件独占）；重放日志应逐分片出现。
+        restarted = OwnedProcesses(self.directory / "restart-proc")
+        self.addCleanup(restarted.close)
+        restarted.start("tickshelfd", [BUILD / "tickshelfd", "--config", self.config])
+        wait_until(lambda: "listening " in restarted.text("tickshelfd"), timeout=10,
+                   description="restarted tickshelfd listening",
+                   processes=restarted, names=("tickshelfd",))
+        send_ticks(self.daemon_port, [tick_bytes(i, 8) for i in range(64, 96)])
+        wait_until(lambda: db_rows(self.db, self.shards) == (96, 96), timeout=10,
+                   description="rows unchanged by idempotent replay then extended",
+                   processes=restarted, names=("tickshelfd",))
+        self.assertEqual(restarted.stop("tickshelfd", timeout=10), 0)
+        log = restarted.text("tickshelfd")
+        self.assertNotIn("raw journal open/replay failed", log)
+        self.assertNotIn("drain incomplete", log)
+        replayed = [int(value) for value in re.findall(r"replayed=(\d+)", log)]
+        self.assertEqual(replayed, [32] * self.shards)  # 每分片重放滞后的 32 条
+        inserted = [int(value) for value in re.findall(r"inserted=(\d+)", log)]
+        self.assertEqual(inserted, [0] * self.shards)   # 同一存储：全部幂等忽略
+        self.assertTrue(verify_sqlite(self.db, self.shards,
+                                      {"records": 96, "unique_records": 96, "symbols": 8})["passed"])
+
     def test_kill9_leaves_recoverable_pending_for_persister(self):
         if not (BUILD / "persister").is_file():
             self.skipTest("persister not built")

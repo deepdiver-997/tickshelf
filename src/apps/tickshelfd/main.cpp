@@ -29,6 +29,7 @@
 #include "components/ingest/ingestor.hpp"
 #include "components/redis/redis_shard_pool.hpp"
 #include "components/redis/resp_client.hpp"
+#include "components/storage/raw_journal.hpp"
 #include "components/storage/sharded_store.hpp"
 #include "components/storage/storage_shard_pool.hpp"
 
@@ -106,6 +107,12 @@ public:
             std::fprintf(stderr,
                          "tickshelfd: --persist storage requires --engine on "
                          "(classic path has no direct-to-storage mode)\n");
+            return false;
+        }
+        if (opt_.raw_journal && !(opt_.engine && opt_.persist == "storage")) {
+            std::fprintf(stderr,
+                         "tickshelfd: --raw-journal requires --engine on --persist storage "
+                         "(write-through uses the Redis lease as its recovery authority)\n");
             return false;
         }
         if (opt_.engine) {
@@ -295,6 +302,26 @@ private:
                 std::fprintf(stderr, "tickshelfd: cannot open engine db %s (%zu shards)\n",
                              opt_.db.c_str(), cfg.shards);
                 return false;
+            }
+            if (opt_.raw_journal) {
+                // ADR-027：本体先于索引；open 内完成水位之后帧的重放（幂等 upsert）。
+                std::vector<tickshelf::RawJournalShard::RecoveryStats> replay;
+                auto journaled = tickshelf::make_raw_journal_shards(
+                    opt_.db, cfg.shards, /*wm_interval=*/32, std::move(storage_shards), &replay);
+                if (journaled.size() != cfg.shards) {
+                    std::fprintf(stderr, "tickshelfd: raw journal open/replay failed for %s\n",
+                                 opt_.db.c_str());
+                    return false;
+                }
+                for (std::size_t i = 0; i < replay.size(); ++i)
+                    std::fprintf(stderr,
+                                 "tickshelfd: raw journal shard %zu replayed=%llu inserted=%llu "
+                                 "torn_tail=%llu\n",
+                                 i,
+                                 static_cast<unsigned long long>(replay[i].replayed_records),
+                                 static_cast<unsigned long long>(replay[i].replayed_inserted),
+                                 static_cast<unsigned long long>(replay[i].torn_tail_bytes));
+                storage_shards = std::move(journaled);
             }
         }
         try {

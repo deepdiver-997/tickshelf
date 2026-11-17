@@ -88,6 +88,30 @@ proof or a replacement for inspecting Storage.
 Permitting pre-commit loss is **not** permission to count an asynchronous,
 unsynced, or merely published write as final durable completion.
 
+### 4.1 Raw journal (ADR-027, single-writer StorageOnly path)
+
+With `--raw-journal` (Engine + `persist=storage` only), the per-shard raw file
+becomes the local commit point: a batch frame is appended and synced
+(`F_FULLFSYNC` when available, otherwise `fsync`) **before** the inner Storage
+commit. There is no cross-resource atomic transaction between the raw file and
+the index store; the ordering contract is:
+
+- raw sync succeeds, index commit lost → replay on next open re-upserts
+  idempotently (storage unique key);
+- raw sync fails → the index commit is never started for that batch;
+- an index commit with **no** durable raw frame is a contract violation of this
+  mode and must not be introduced.
+
+The persisted watermark (`<shard>.raw.wm`, temp-file + fsync + rename + directory
+fsync, pinned at open and every 32 commits) is a **replay cursor, not a
+durability promise**: it may lag committed state (harmless — replay is
+idempotent) but must never claim more than the raw file durably contains. A torn
+tail from a crash mid-append is truncated to the last complete frame at open;
+corrupt frames beyond a parseable boundary are discarded, not silently served.
+Watermark loss only costs replay work. Raw replay is a single-machine recovery
+mechanism for the storage-only path; write-through keeps the Redis lease as its
+recovery authority and does not stack this journal.
+
 ## 5. Fault policy is not the healthy benchmark PASS rule
 
 A healthy/no-injected-fault benchmark still requires independently reconciled
@@ -137,6 +161,28 @@ New evidence claiming this contract must identify
 runtime settings. The 2026-11-14/15 reports and machine evidence are historical:
 they are **not rewritten or retroactively upgraded** with unobserved Redis
 settings, this contract ID, or a claim that they were rerun under it.
+
+## 8. Distributed topology (declared, not implemented)
+
+A routing/dispatch layer that assigns work to multiple persisting instances may
+be specified against this contract only under these boundaries:
+
+- The **durability commitment is made by each instance's own Storage commit**
+  (or raw-journal sync, §4.1). The router's watermark/completion tracking is an
+  **aggregate recovery hint**, never the commit point and never a durability
+  promise. Advancing a watermark must not ACK upstream records whose owning
+  instance has not made its durable commitment.
+- Raw-file ownership follows the topology: single-machine mode owns its raw
+  file locally; a routed deployment must define which component records and
+  replays each instance's journal (typically the router, keyed by instance) —
+  undefined ownership is treated as **no raw journal**.
+- Instance persistence success with a lost router acknowledgement produces
+  redelivery, absorbed by storage idempotence; it does not require a new
+  protocol. "Watermark above X is never lost" would be a two-generals promise
+  and is out of scope.
+- tickshelf ships **no implementation** of this topology; these boundaries
+  exist so a production router cannot silently exceed the single-machine
+  contract.
 
 Default inputs remain **synthetic**, with `production_qualified=false` unless the
 separate source/qualification requirements are actually satisfied. Public

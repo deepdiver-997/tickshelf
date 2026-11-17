@@ -41,6 +41,7 @@ add_library(tickshelf_lib STATIC
   src/components/storage/shard_route.cpp
   src/components/storage/sharded_store.cpp
   src/components/storage/sqlite_store.cpp
+  src/components/storage/raw_journal.cpp
   src/components/storage/storage_shard_pool.cpp
   src/components/engine/dedupe.cpp
   src/components/engine/engine.cpp)
@@ -124,6 +125,7 @@ if(TICKSHELF_BUILD_TESTS)
     tests/test_resp.cpp
     tests/test_sharded_store.cpp
     tests/test_shard_route.cpp
+    tests/test_raw_journal.cpp
     tests/test_bounded_queue.cpp
     tests/test_engine_dedupe.cpp
     tests/test_engine.cpp

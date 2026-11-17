@@ -233,6 +233,13 @@
 - **观测决定**：`scripts/stack_runtime.py` 提供 `redis_runtime_snapshot`，只连显式 host/port，记录 caller-declared `owned_private|external`、requested/observed、UTC 时间、server 版本/PID；逐项 CONFIG GET appendonly/save/appendfsync/maxmemory/maxmemory-policy 与 INFO server/persistence/memory。ACL/缺失/错误为 explicit denied/unknown/error 与 partial 汇总，不猜默认值；no-AOF 下 appendfsync 标 inactive。不改私有启动参数/外部 Redis，不执行 CONFIG SET/REWRITE、SAVE/BGSAVE、FLUSH、SHUTDOWN；不接入无网络的 `--print-config`。
 - **代价与证据边界**：接受预提交永久缺失且不能给定固定损失预算；观测是分时读取而非原子持久性证明。2026-11-14/15 历史报告/机器证据不改写，不回填新合同或未观测设置。synthetic、`production_qualified=false` 和公开字段来源/授权要求保持原意；DCRB 为 `not_adapted`，不新增适配/生产兼容声明。
 
+## ADR-025 RESP 客户端就绪驱动化：send/collect 解耦与可中断 I/O（2026-11-18）
+
+- **背景**：旧 RespClient 是阻塞 socket + `SO_RCVTIMEO(5s)`：收回复占用整个调用线程，半死连接要等满超时；`Engine::drain` 的 deadline 只能唤醒重试退避，无法打断已进入适配器的 Redis I/O（旧文档如实承认 join 干等）。消融实验显示 Redis 阶段是真实热点之一（`R=0` 行完成率显著更高），客户端阻塞行为正是公司侧实验的第一个热点。
+- **决定**：连接 fd 改非阻塞，一切等待 `poll` 就绪驱动（回复字节到达由内核唤醒，不轮询）；API 拆为 `send_pipeline`（字节交给内核即返回，不等回复）与 `collect_replies`（就绪时收，先收割解析缓冲残留、可跨调用续收）并显式携带 `RespDeadline`；`interrupt()` 以 `shutdown(SHUT_RDWR)` 从其他线程立即唤醒阻塞中的等待。`RedisShard` 端口新增 `interrupt()`，`Engine::drain` 超时放弃时对全部 Redis 端口调用——drain 的 deadline 对 Redis I/O 从此是硬上界。`exec()` 保留为 send+collect 的兼容封装：flush/finish/release、persister、reader、queryd、bench 全部零改动。
+- **拒绝的替代**：完整 epoll/kqueue 事件循环 + 回调框架。单线程多路复用只省线程数，不改变任何已测瓶颈（热点在存储提交与发布重试）；每分片专职 worker 已把 Redis I/O 移出收包线程；且违背"RESP/网络手写、零外部框架"的学习目标。Engine 内"发布发送与上一片存储提交重叠"的两阶段 publish/finish 是独立的吞吐优化，评估后再做，不搭车。
+- **边界**：被中断或超时的连接一律视为不可信，调用方 close 后重连（Engine 的懒重连语义不变）；Storage 侧（SQLite 提交）的阻塞 I/O 仍不可中断，drain 报告如实区分。`send/collect` 解耦当前无生产调用方（为后续流水线重叠预留），行为由离线假服务器测试覆盖：半包重组、跨调用留存、截止失败、中断唤醒，均不依赖 redis-server。
+
 ## 数据模型（Redis）
 
 - ~~行情键 `ts:{symbol}:{yyyymmdd}`（v1 逐 tick ZSET，member=64B Tick 原始字节）~~ — ADR-017 起退役（dev 期 flag-day 换段式；生产期格式迁移走 ADR-018 双读配方）

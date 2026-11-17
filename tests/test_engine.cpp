@@ -508,3 +508,53 @@ TEST_CASE("Engine: expired drain does not start blocking I/O for every queued sl
     CHECK(harness.redis->publish_calls.load() == 1);
     CHECK(harness.storage->calls.load() == 0);
 }
+
+TEST_CASE("Engine: drain 超时会 interrupt 阻塞中的 Redis 适配器并立即返回") {
+    // 模拟半死 Redis：publish_and_claim 长时间阻塞，只有 interrupt() 能唤醒。
+    // 语义与 RespRedisShard 相同：连接层失败 + Engine 停止 → worker 退出。
+    struct HangableRedis final : RedisShard {
+        std::atomic<bool> interrupted{false};
+        std::mutex mutex_;
+        std::condition_variable cv_;
+        bool wake = false;
+
+        bool publish_and_claim(const std::vector<Batch>&, const FlushOptions&,
+                               std::vector<char>& claimed) override {
+            claimed.clear();
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, 30s, [&] { return wake; });  // 无人唤醒会挂满 30s
+            return false;
+        }
+        bool finish(const std::vector<std::string>&) override { return true; }
+        bool release(const std::vector<std::string>&) override { return true; }
+        void interrupt() override {
+            interrupted.store(true, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                wake = true;
+            }
+            cv_.notify_all();
+        }
+    };
+
+    auto config = config_for(WriteMode::PublishOnly);
+    auto redis = std::make_unique<HangableRedis>();
+    auto* redis_ptr = redis.get();
+    std::vector<std::unique_ptr<RedisShard>> redis_shards;
+    redis_shards.push_back(std::move(redis));
+    Engine engine(config, std::move(redis_shards), {});
+
+    const std::vector<Tick> ticks = {make_tick("A", 1), make_tick("A", 2)};
+    REQUIRE(engine.submit(ticks, 0) == 2);
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto report = engine.drain(50ms);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    CHECK(redis_ptr->interrupted.load());
+    // 不 interrupt 的话 join 要等 fake 的 30s；唤醒后应在秒级返回。
+    CHECK(elapsed < 5s);
+    CHECK_FALSE(report.queue_complete);
+    CHECK_FALSE(report.storage_complete);
+    CHECK(report.pending_records == 2);
+}

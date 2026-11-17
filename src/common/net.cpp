@@ -88,4 +88,6 @@ void set_nonblock(int fd, bool on) {
     ::fcntl(fd, F_SETFL, on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK));
 }
 
+void shutdown_fd(int fd) { ::shutdown(fd, SHUT_RDWR); }
+
 }  // namespace tickshelf::net

@@ -27,6 +27,8 @@ public:
                            std::vector<char>& claimed) override;
     bool finish(const std::vector<std::string>& batch_ids) override;
     bool release(const std::vector<std::string>& batch_ids) override;
+    // 唤醒阻塞中的连接 I/O；被中断的连接不可信，下次调用前会重连。
+    void interrupt() override;
 
 private:
     bool ensure_connected();

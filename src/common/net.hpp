@@ -45,5 +45,7 @@ int tcp_listen(const std::string& bind_host, std::uint16_t port, int backlog = 6
 int tcp_accept(int listen_fd);                                             // 阻塞 accept
 void set_recv_timeout_ms(int fd, int ms);                                  // SO_RCVTIMEO
 void set_nonblock(int fd, bool on);
+// 全关闭：让本端阻塞在 poll/recv/send 上的调用立即返回（EOF/错误），用于中断。
+void shutdown_fd(int fd);
 
 }  // namespace tickshelf::net

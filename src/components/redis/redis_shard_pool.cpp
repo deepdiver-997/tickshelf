@@ -13,6 +13,8 @@ bool RespRedisShard::ensure_connected() {
     return client_.connected() || client_.connect(host_, port_);
 }
 
+void RespRedisShard::interrupt() { client_.interrupt(); }
+
 bool RespRedisShard::publish_and_claim(const std::vector<Batch>& batches,
                                        const FlushOptions& options,
                                        std::vector<char>& claimed) {

@@ -340,7 +340,10 @@ DrainReport Engine::drain(std::chrono::milliseconds timeout) {
         std::lock_guard<std::mutex> lock(done_mutex_);
         stopping_.store(true, std::memory_order_release);
     }
-    done_cv_.notify_all(); // interrupt retry backoff; already-blocking I/O still has to return
+    done_cv_.notify_all(); // interrupt retry backoff
+    // Redis 端口可被中断：阻塞中的 publish/finish/release 立即以失败返回，
+    // join 不再等满一个连接超时。Storage 的阻塞提交不可中断，等它完成当前调用。
+    for (auto& port : redis_) port->interrupt();
     for (auto& ptr : shards_) ptr->ready.close();
     for (auto& ptr : shards_)
         if (ptr->worker.joinable()) ptr->worker.join();

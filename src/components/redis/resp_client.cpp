@@ -1,5 +1,6 @@
 #include "resp_client.hpp"
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -140,6 +141,11 @@ int RespParser::try_parse(RespValue& out) {
 void RespParser::feed(const std::uint8_t* data, std::size_t n, std::vector<RespValue>& out) {
     if (failed_) return;
     buf_.append(reinterpret_cast<const char*>(data), n);
+    drain(out);
+}
+
+void RespParser::drain(std::vector<RespValue>& out) {
+    if (failed_) return;
     for (;;) {
         RespValue v;
         const int r = try_parse(v);
@@ -156,26 +162,85 @@ void RespParser::feed(const std::uint8_t* data, std::size_t n, std::vector<RespV
     }
 }
 
-// ---- 阻塞客户端 ----
+// ---- 就绪驱动的客户端 ----
+
+void RespClient::interrupt() {
+    interrupted_.store(true, std::memory_order_release);
+    if (fd_.is_open()) net::shutdown_fd(fd_.get());  // 阻塞中的 poll/recv 立即返回
+}
 
 bool RespClient::connect(const std::string& host, std::uint16_t port) {
     close();
     const int fd = net::tcp_connect(host, port);
     if (fd < 0) return false;
     fd_.reset(fd);
-    net::set_recv_timeout_ms(fd_.get(), 5000);  // 半死连接不挂死调用方（超时按连接失败处理）
+    net::set_nonblock(fd_.get(), true);  // 等待一律 poll 就绪驱动；recv 只在就绪后调用
     return true;
 }
 
-bool RespClient::write_all(const std::string& data) {
-    std::size_t sent = 0;
-    while (sent < data.size()) {
-        const ssize_t n = ::send(fd_.get(), data.data() + sent, data.size() - sent, 0);
-        if (n <= 0) {
-            if (n < 0 && (errno == EINTR)) continue;
+bool RespClient::wait_ready(short events, RespDeadline deadline) {
+    for (;;) {
+        if (interrupted()) return false;
+        if (deadline.expired()) return false;
+        pollfd p{};
+        p.fd = fd_.get();
+        p.events = events;
+        const int rc = ::poll(&p, 1, static_cast<int>(deadline.remaining_ms()));
+        if (rc < 0) {
+            if (errno == EINTR) continue;
             return false;
         }
-        sent += static_cast<std::size_t>(n);
+        if (rc == 0) return false;  // 截止到期
+        if (p.revents & (POLLERR | POLLNVAL)) return false;
+        // POLLHUP 也返回 true：交给 recv 用 EOF/连接重置定论，不在这里猜。
+        if (p.revents & (events | POLLHUP)) return true;
+    }
+}
+
+bool RespClient::send_all(const char* data, std::size_t size, RespDeadline deadline) {
+    std::size_t sent = 0;
+    while (sent < size) {
+        if (interrupted() || deadline.expired()) return false;
+        const ssize_t n = ::send(fd_.get(), data + sent, size - sent, 0);
+        if (n > 0) {
+            sent += static_cast<std::size_t>(n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (!wait_ready(POLLOUT, deadline)) return false;
+            continue;
+        }
+        return false;  // 连接错误 / 对端关闭
+    }
+    return true;
+}
+
+bool RespClient::send_pipeline(const std::vector<std::vector<std::string>>& commands,
+                               RespDeadline deadline) {
+    if (!connected() || commands.empty()) return false;
+    std::string wire;
+    for (const auto& cmd : commands) encode_command(cmd, wire);
+    return send_all(wire.data(), wire.size(), deadline);
+}
+
+bool RespClient::collect_replies(std::size_t expected, RespDeadline deadline,
+                                 std::vector<RespValue>& out) {
+    if (!connected()) return false;
+    if (expected == 0) return true;
+    parser_.drain(out);  // 先收割上次调用残留在缓冲里的完整回复，不等网络
+    while (out.size() < expected) {
+        if (parser_.failed()) return false;
+        if (interrupted() || deadline.expired()) return false;
+        if (!wait_ready(POLLIN, deadline)) return false;
+        std::uint8_t tmp[16384];
+        const ssize_t n = ::recv(fd_.get(), tmp, sizeof(tmp), 0);
+        if (n > 0) {
+            parser_.feed(tmp, static_cast<std::size_t>(n), out);
+            continue;
+        }
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        return false;  // EOF / 连接重置（含被 interrupt 的 shutdown）
     }
     return true;
 }
@@ -185,24 +250,8 @@ bool RespClient::exec(const std::vector<std::vector<std::string>>& commands,
     if (!connected() || commands.empty()) return false;
     replies.clear();
     replies.reserve(commands.size());
-
-    std::string wire;
-    for (const auto& cmd : commands) encode_command(cmd, wire);
-    if (!write_all(wire)) return false;
-
-    // 临时喂给一个带缓冲收件的解析循环：read_some 推进 parser_，
-    // parser_ 里解出的完整回复由 out 承接。
-    while (replies.size() < commands.size()) {
-        std::uint8_t tmp[16384];
-        const ssize_t n = ::recv(fd_.get(), tmp, sizeof(tmp), 0);
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            return false;  // 连接失败/超时
-        }
-        parser_.feed(tmp, static_cast<std::size_t>(n), replies);
-        if (parser_.failed()) return false;
-    }
-    return true;
+    if (!send_pipeline(commands, default_deadline())) return false;
+    return collect_replies(commands.size(), default_deadline(), replies);
 }
 
 }  // namespace tickshelf

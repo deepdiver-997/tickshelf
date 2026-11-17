@@ -35,6 +35,9 @@ public:
                                    std::vector<char>& claimed) = 0;
     virtual bool finish(const std::vector<std::string>& batch_ids) = 0;
     virtual bool release(const std::vector<std::string>& batch_ids) = 0;
+    // 从其他线程立即唤醒本适配器内阻塞的连接 I/O（Engine 超时放弃时调用）。
+    // 必须幂等、线程安全；默认无操作（测试 fake 与不阻塞的实现）。
+    virtual void interrupt() {}
 };
 
 // 每分片的存储端口（真实实现包装 SqliteTickStore；未来 clickhouse/parquet 适配器
@@ -140,8 +143,9 @@ public:
     // Null sink、skipped、degraded 都可能完成队列。完整存储状态见 drain 报告。
     bool wait_idle(std::chrono::milliseconds timeout);
 
-    // 源线程：封口 staging，限时等待；超时唤醒退避并放弃尚未启动的队列 I/O。
-    // 已进入 adapter 的阻塞 I/O 无法被此 deadline 打断；join 仍会等待它返回。
+    // 源线程：封口 staging，限时等待；超时唤醒退避并放弃尚未启动的队列 I/O，
+    // 并 interrupt 各 Redis 端口——阻塞中的 Redis I/O 被内核立即返回，join 不再
+    // 干等。Storage（SQLite）的阻塞提交仍会完成当前调用，报告如实反映。
     DrainReport drain(std::chrono::milliseconds timeout);
 
     // 幂等停止（析构会调用）；等价于 drain(shutdown_ms)。

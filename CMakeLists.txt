@@ -90,6 +90,9 @@ if(TICKSHELF_BUILD_BENCHMARKS)
   target_link_libraries(tickshelf_bench_lib PUBLIC tickshelf_lib simdjson::simdjson OpenSSL::Crypto)
   add_executable(pipeline_bench bench/main.cpp)
   target_link_libraries(pipeline_bench PRIVATE tickshelf_bench_lib)
+  # Diagnostic adapters are never reachable from production service CLI flags.
+  add_executable(engine_ablation bench/engine_ablation.cpp)
+  target_link_libraries(engine_ablation PRIVATE tickshelf_lib)
   add_executable(pipeline_sqlite_probe bench/sqlite_probe.cpp)
   target_link_libraries(pipeline_sqlite_probe PRIVATE tickshelf_lib)
   if(TICKSHELF_BENCH_ROCKSDB)
@@ -139,7 +142,8 @@ if(TICKSHELF_BUILD_TESTS)
   if(TICKSHELF_BUILD_BENCHMARKS)
     add_executable(tickshelf_bench_tests tests/main.cpp
       tests/test_bench_record.cpp tests/test_bench_store.cpp tests/test_bench_pipeline.cpp
-      tests/test_bench_runtime.cpp tests/test_bench_rocks_record.cpp tests/test_bench_sqlite_lookup.cpp)
+      tests/test_bench_runtime.cpp tests/test_bench_rocks_record.cpp tests/test_bench_sqlite_lookup.cpp
+      tests/test_bench_store_lookup.cpp)
     target_include_directories(tickshelf_bench_tests PRIVATE third_party)
     target_compile_definitions(tickshelf_bench_tests PRIVATE TICKSHELF_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(tickshelf_bench_tests PRIVATE tickshelf_bench_lib)

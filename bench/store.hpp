@@ -31,6 +31,9 @@ struct StoreOptions {
     // separate uses digest-candidate SELECT + exact byte comparison, then INSERT VALUES
     // in the same BEGIN IMMEDIATE transaction, with no schema/dedup change.
     std::string sqlite_compact_lookup = "subquery";  // subquery | separate
+    // Synthetic zero-repeat diagnostic only; uses an isolated directory/format.
+    // Appended to preserve existing positional aggregate initialization.
+    std::string store_lookup = "exact";  // exact | assume_unique
 };
 
 class Store {
@@ -40,7 +43,8 @@ public:
     virtual bool finish(std::string& error) = 0;
     // One JSON object per physical stored record: symbol, time, hex (canonical bytes).
     virtual bool export_rows(std::ostream& out, std::string& error) = 0;
-    // Inclusive time bounds; exact canonical duplicates are emitted once.
+    // Inclusive time bounds; exact mode emits canonical duplicates once.
+    // assume_unique exports physical rows without masking precondition violations.
     virtual bool export_range(const std::string& symbol, std::uint64_t from, std::uint64_t to,
                               std::ostream& out, std::string& error) = 0;
     virtual std::string info_json() const = 0;

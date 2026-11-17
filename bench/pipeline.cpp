@@ -43,6 +43,14 @@ Pipeline::Pipeline(const Config& config, Metrics& metrics, Store& store, Clock n
              "transaction_rows_sum", "transaction_rows_min", "transaction_rows_max",
              "transaction_bytes_sum", "transaction_bytes_min", "transaction_bytes_max"})
         metrics_.counters.try_emplace(name, 0);
+    // Actual-work evidence for ablation tables. A disabled network/hash stage
+    // still retains queue handoff and canonical encoding; do not call it free.
+    metrics_.counters["ablation_work_schema"] = 1;
+    for (const char* name : {"record_encoded_records", "redis_build_records",
+             "redis_publish_records", "redis_readback_records", "redis_network_execs",
+             "redis_cleanup_batches", "dedup_lookup_records", "dedup_candidate_comparisons",
+             "hash_bypassed_records"})
+        metrics_.counters.try_emplace(name, 0);
     for (const char* stage : {"hash", "redis", "store"})
         for (const char* reason : {"rows", "bytes", "age", "tail"})
             metrics_.counters.try_emplace(std::string(stage) + "_flush_" + reason, 0);
@@ -65,6 +73,7 @@ void Pipeline::add(const std::vector<Record>& records) {
             auto bytes = encode_record(record);
             require(!bytes.empty() && bytes.size() <= kMaxRecordBytes, "invalid canonical record");
             metrics_.inc("canonical_bytes", bytes.size());
+            metrics_.inc("record_encoded_records");
             encoded_.push_back({record.symbol, record.time, std::move(bytes), {}, false, ingress});
         }
     }
@@ -189,6 +198,7 @@ void Pipeline::exec(const std::vector<std::vector<std::string>>& commands,
     for (const auto& reply : replies)
         require(reply.type != RespValue::Type::Error, "Redis command failed: " + reply.str);
     metrics_.inc("redis_commands", commands.size());
+    metrics_.inc("redis_network_execs");
 }
 
 void Pipeline::flush_redis(FlushReason reason) {
@@ -204,6 +214,7 @@ void Pipeline::flush_redis(FlushReason reason) {
         const std::string key = "iqbench:batch:" + std::to_string(redis_id_++);
         {
             Timer timer(metrics_, "redis_build");
+            metrics_.inc("redis_build_records", records.size());
             std::map<std::string, std::uint64_t> symbols;
             std::size_t payload_bytes = 0;
             for (const auto& record : records) payload_bytes += record.bytes.size() + 4;
@@ -230,6 +241,7 @@ void Pipeline::flush_redis(FlushReason reason) {
         if (config_.redis != "encode") {
             std::vector<RespValue> replies;
             exec(commands, replies, "redis_publish_wait");
+            metrics_.inc("redis_publish_records", records.size());
             if (config_.redis == "roundtrip") {
                 exec({{"GET", key}}, replies, "redis_read_wait");
                 // Only whole-payload equality makes cached SHA/time metadata
@@ -248,6 +260,7 @@ void Pipeline::flush_redis(FlushReason reason) {
                         redis_decoded_[i].has_sha256 = records[i].has_sha256;
                         redis_decoded_[i].ingress_ns = records[i].ingress_ns;
                     }
+                    metrics_.inc("redis_readback_records", redis_decoded_.size());
                     records.swap(redis_decoded_);
                     redis_decoded_.clear();
                 }
@@ -256,6 +269,7 @@ void Pipeline::flush_redis(FlushReason reason) {
             for (std::size_t i = 1; i < commands.size(); ++i)
                 cleanup.push_back({"ZREM", commands[i][1], key});
             exec(cleanup, replies, "redis_cleanup_wait");
+            metrics_.inc("redis_cleanup_batches");
         }
     }
     for (auto& record : records) {

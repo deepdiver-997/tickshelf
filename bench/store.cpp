@@ -363,10 +363,17 @@ public:
                                  "file_write_bytes", "file_sync_calls", "index_rows", "symbol_index_rows",
                                  "metadata_sql_rows", "range_candidate_segments", "range_decoded_rows", "range_emitted_rows",
                                  "store_digest_cache_hits", "store_digest_computed", "store_digest_bytes", "store_digest_override_calls",
+                                 "backend_digest_recomputed", "backend_digest_cached", "backend_lookup_calls", "backend_candidates",
+                                 "backend_inserted", "backend_ignored",
                                  "rocksdb_write_batches", "rocksdb_put_ops", "rocksdb_key_bytes", "rocksdb_value_bytes",
                                  "rocksdb_writebatch_bytes", "rocksdb_get_calls", "rocksdb_range_iterator_steps",
                                  "rocksdb_range_read_bytes", "metadata_kv_rows"})
             metrics_.counters.try_emplace(name, 0);
+        metrics_.counters["backend_lookup_exact"] = options_.store_lookup == "exact";
+        metrics_.counters["backend_lookup_assume_unique"] = options_.store_lookup == "assume_unique";
+        // The original SQLite subquery does not materialize its candidates in C++.
+        metrics_.counters["backend_candidates_observable"] = options_.backend == "sqlite_compact" &&
+            (options_.store_lookup == "assume_unique" || options_.sqlite_compact_lookup == "separate");
     }
 protected:
     StoreOptions options_;
@@ -384,6 +391,8 @@ protected:
         ++transactions_;
         metrics_.inc("inserted", inserted);
         metrics_.inc("ignored", ignored);
+        metrics_.inc("backend_inserted", inserted);
+        metrics_.inc("backend_ignored", ignored);
         metrics_.inc("payload_bytes", bytes);
         metrics_.inc("transactions");
     }
@@ -437,10 +446,11 @@ private:
 class SqliteStore final : public StoreBase {
 public:
     SqliteStore(const StoreOptions& options, Metrics& metrics)
-        : StoreBase(options, metrics), directory_(prepare_directory(options.directory)),
-          compact_(options.backend == "sqlite_compact"),
-          separate_(compact_ && options.sqlite_compact_lookup == "separate"),
-          db_(directory_ / (compact_ ? "compact-record.sqlite3" : "full-record.sqlite3"), options, compact_ ? 2 : 1) {
+        : StoreBase(options, metrics), directory_(prepare_directory(options.store_lookup == "assume_unique" ?
+              (fs::path(options.directory) / "sqlite-compact-assume-unique-v1").string() : options.directory)),
+          compact_(options.backend == "sqlite_compact"), assume_unique_(options.store_lookup == "assume_unique"),
+          separate_(compact_ && !assume_unique_ && options.sqlite_compact_lookup == "separate"),
+          db_(directory_ / (compact_ ? "compact-record.sqlite3" : "full-record.sqlite3"), options, assume_unique_ ? 3 : (compact_ ? 2 : 1)) {
         if (compact_) {
             db_.exec("CREATE TABLE IF NOT EXISTS records(id INTEGER PRIMARY KEY, payload BLOB NOT NULL,"
                      " symbol TEXT NOT NULL, time BLOB NOT NULL CHECK(typeof(time)='blob' AND length(time)=8),"
@@ -466,6 +476,11 @@ public:
             db_.exec(kHeavySchema);
         }
         physical_rows_ = static_cast<std::uint64_t>(db_.scalar_int("SELECT count(*) FROM records"));
+        // No uniqueness constraint is added to the diagnostic format: collisions
+        // and accidental repeats remain physical rows for the independent oracle.
+        // Reopen validates the zero-repeat precondition outside workload counters.
+        if (assume_unique_ && db_.scalar_int("SELECT EXISTS(SELECT 1 FROM records GROUP BY payload HAVING count(*)>1)") != 0)
+            fail("assume_unique store contains duplicate exact canonical payloads");
         if (options_.reuse_statement) {
             db_.prepare(insert_, insert_sql(), &metrics_);
             if (separate_lookup()) db_.prepare(lookup_, lookup_sql(), &metrics_, true);
@@ -514,6 +529,9 @@ public:
                     db_.check(sqlite3_bind_blob(statement.ptr, 4, digest.data(), static_cast<int>(digest.size()),
                                                SQLITE_TRANSIENT), "bind digest");
                 }
+                // Count the actual SQL-level candidate check, not an extra API
+                // call: default subquery lookup is part of the INSERT statement.
+                if (compact_ && !assume_unique_ && !separate_lookup()) metrics_.inc("backend_lookup_calls");
                 step_done(db_, statement.ptr, metrics_);
                 metrics_.inc("sqlite_changes_calls");
                 inserted += static_cast<std::uint64_t>(sqlite3_changes(db_.handle));
@@ -575,10 +593,15 @@ public:
             ",\"sync_method\":\"SQLite WAL synchronous=" + options_.synchronous +
             "\",\"database\":" + json_quote((directory_ / (compact_ ? "compact-record.sqlite3" : "full-record.sqlite3")).string()) +
             ",\"transaction_model\":" + json_quote(options_.transaction_model) +
+            ",\"store_lookup\":" + json_quote(options_.store_lookup) +
+            (assume_unique_ ? ",\"production\":false,\"synthetic_only\":true,\"format_stamp\":\"tickshelf-bench/sqlite-compact-assume-unique/v1/RCD1/user_version=3\",\"uniqueness_contract\":\"prevalidated zero-repeat synthetic input only; writes retain every physical row; independent export oracle and strict reopen detect repeats\"" : "") +
+            ",\"backend_lookup_metric_scope\":\"workload only, excluding recovery/export; lookup_calls counts candidate SQL executions (including the original INSERT subquery); candidates counts rows returned for C++ exact comparison, not SQLite internal visits; backend_candidates_observable=0 means internal subquery candidates are unavailable, not measured zero\"" +
             ",\"sqlite_compact_lookup\":" + json_quote(compact_ ? options_.sqlite_compact_lookup : "not_applicable") +
-            ",\"compact_lookup_algorithm\":" + json_quote(separate_lookup() ?
-                "prepared digest-candidate SELECT; exact canonical byte comparison in C++; reset/clear lookup before prepared INSERT VALUES; both inside BEGIN IMMEDIATE" :
-                (compact_ ? "original INSERT SELECT WHERE NOT EXISTS(digest AND full payload) inside BEGIN IMMEDIATE" : "not applicable")) +
+            ",\"compact_lookup_algorithm\":" + json_quote(assume_unique_ ?
+                "synthetic assume_unique diagnostic: no candidate SQL; prepared INSERT VALUES retains canonical payload, SHA-256 digest, all indexes and transaction/sync work" :
+                (separate_lookup() ?
+                    "prepared digest-candidate SELECT; exact canonical byte comparison in C++; reset/clear lookup before prepared INSERT VALUES; both inside BEGIN IMMEDIATE" :
+                    (compact_ ? "original INSERT SELECT WHERE NOT EXISTS(digest AND full payload) inside BEGIN IMMEDIATE" : "not applicable"))) +
             ",\"lookup_metric_scope\":\"sqlite_lookup_*_calls are subsets of aggregate sqlite_* workload API counters, not additional calls to add again; lookup prepare/step timings are subsets of aggregate prepare/step, while bind/reset/clear are independently timed; prepare includes open-time lifetime reuse; step counts each ROW/DONE/error sqlite3_step; rows counts record lookups and candidate_bytes counts returned canonical bytes, not physical I/O; library APIs are not syscalls\"" +
             ",\"reuse_statement\":" + (options_.reuse_statement ? "true" : "false") +
             ",\"statement_reuse_scope\":" + json_quote(options_.reuse_statement ?
@@ -588,21 +611,23 @@ public:
                 "sqlite_prepare measures workload INSERT/metadata and digest-candidate lookup SELECT prepares, including open-time lifetime reuse; sqlite_lookup_prepare is a subset; export/recovery/schema prepares excluded" :
                 "sqlite_prepare measures write-statement prepares only, including open-time prepares for lifetime reuse; query/recovery/schema prepares excluded") +
             ",\"sqlite_api_count_scope\":\"library API calls, NOT syscalls/kernel calls; begin/commit count sqlite3_exec calls in the same scope as corresponding Timer counts; prepare/step count workload API scope (including separate lookup when selected); bind/reset/clear_bindings/changes and error rollback/cleanup count workload API invocations; schema, recovery and export APIs excluded; no per-record JSON logging\"" +
-            ",\"deduplication\":" + json_quote(compact_ ?
-                (separate_lookup() ?
-                    "nonunique fixed32 SHA-256 candidates then exact full payload comparison; separate prepared SELECT and INSERT VALUES within BEGIN IMMEDIATE" :
-                    "nonunique fixed32 SHA-256 candidates then exact full payload comparison; INSERT SELECT NOT EXISTS within BEGIN IMMEDIATE") :
-                "exact canonical payload BLOB primary key, not a digest") +
+            ",\"deduplication\":" + json_quote(assume_unique_ ?
+                "none; synthetic zero-repeat assume_unique diagnostic; fixed32 nonunique SHA-256 digest index retained" :
+                (compact_ ?
+                    (separate_lookup() ?
+                        "nonunique fixed32 SHA-256 candidates then exact full payload comparison; separate prepared SELECT and INSERT VALUES within BEGIN IMMEDIATE" :
+                        "nonunique fixed32 SHA-256 candidates then exact full payload comparison; INSERT SELECT NOT EXISTS within BEGIN IMMEDIATE") :
+                    "exact canonical payload BLOB primary key, not a digest")) +
             ",\"schema_cost\":" + json_quote(compact_ ?
                 "INTEGER PRIMARY KEY payload table; fixed32 nonunique digest index and symbol/time indexes contain rowid only; no UNIQUE(digest,payload)" :
                 "WITHOUT ROWID payload key plus full key copied into symbol/time secondary index and any heavy indexes; not compact digest indexing") +
             ",\"digest_cache_contract\":\"private trusted EncodedRecord.sha256 valid only while canonical bytes unchanged; missing SHA-256 computed and separately timed/counted; test override takes precedence\","
             "\"time_encoding\":\"uint64 big-endian 8-byte BLOB\",\"physical_rows\":" + std::to_string(physical_rows_) +
-            ",\"physical_duplicate_rows\":0,\"counters\":" + counts_json() + ",\"sqlite\":" + db_.info_json() + "}";
+            ",\"physical_duplicate_rows\":" + (assume_unique_ ? "null" : "0") + ",\"counters\":" + counts_json() + ",\"sqlite\":" + db_.info_json() + "}";
     }
 private:
     fs::path directory_;
-    bool compact_, separate_;
+    bool compact_, assume_unique_, separate_;
     Database db_;
     Statement insert_, lookup_, metadata_;
     bool separate_lookup() const { return separate_; }
@@ -631,6 +656,7 @@ private:
     bool lookup_contains(sqlite3_stmt* statement, const EncodedRecord& record,
                          const std::array<unsigned char, 32>& digest) {
         Timer all(metrics_, "sqlite_lookup");
+        metrics_.inc("backend_lookup_calls");
         metrics_.inc("sqlite_lookup_rows");
         bool match = false;
         try {
@@ -656,6 +682,7 @@ private:
                 const auto* data = static_cast<const char*>(sqlite3_column_blob(statement, 0));
                 if (!data || size <= 0 || size > static_cast<int>(kMaxRecordBytes)) fail("invalid compact lookup payload length");
                 metrics_.inc("sqlite_lookup_candidate_rows");
+                metrics_.inc("backend_candidates");
                 metrics_.inc("sqlite_lookup_candidate_bytes", static_cast<std::uint64_t>(size));
                 if (std::string_view(data, static_cast<std::size_t>(size)) == record.bytes) {
                     match = true;
@@ -674,7 +701,7 @@ private:
         return match;
     }
     const char* insert_sql() const {
-        if (separate_lookup()) return "INSERT INTO records(payload,symbol,time,digest) VALUES(?1,?2,?3,?4)";
+        if (assume_unique_ || separate_lookup()) return "INSERT INTO records(payload,symbol,time,digest) VALUES(?1,?2,?3,?4)";
         return compact_ ?
             "INSERT INTO records(payload,symbol,time,digest) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS("
             "SELECT 1 FROM records INDEXED BY records_digest WHERE digest=?4 AND payload=?1)" :
@@ -1489,6 +1516,7 @@ void emit_row(std::ostream& out, const Record& record, std::string_view bytes) {
 std::array<unsigned char, 32> record_digest(const EncodedRecord& record, const StoreOptions& options, Metrics& metrics) {
     if (!options.test_digest && record.has_sha256) {
         metrics.inc("store_digest_cache_hits");
+        metrics.inc("backend_digest_cached");
         return record.sha256;
     }
     Timer timer(metrics, "store_digest_compute");
@@ -1501,6 +1529,7 @@ std::array<unsigned char, 32> record_digest(const EncodedRecord& record, const S
         std::memcpy(result.data(), digest.data(), result.size());
     } else {
         metrics.inc("store_digest_computed");
+        metrics.inc("backend_digest_recomputed");
         unsigned size = 0;
         if (EVP_Digest(record.bytes.data(), record.bytes.size(), result.data(), &size, EVP_sha256(), nullptr) != 1 ||
             size != result.size()) fail("store SHA-256 computation failed");
@@ -1523,6 +1552,10 @@ std::unique_ptr<Store> open_store(const StoreOptions& options, Metrics& metrics,
         if (options.autocheckpoint < 0) fail("autocheckpoint must be nonnegative");
         if (options.fullfsync != "default" && options.fullfsync != "on" && options.fullfsync != "off")
             fail("fullfsync must be default, on or off");
+        if (options.store_lookup != "exact" && options.store_lookup != "assume_unique")
+            fail("store_lookup must be exact or assume_unique");
+        if (options.store_lookup == "assume_unique" && options.backend != "sqlite_compact" && options.backend != "rocksdb")
+            fail("store_lookup=assume_unique requires sqlite_compact or full-record rocksdb backend");
         if (options.sqlite_compact_lookup != "subquery" && options.sqlite_compact_lookup != "separate")
             fail("sqlite_compact_lookup must be subquery or separate");
         if (options.sqlite_compact_lookup == "separate" && options.backend != "sqlite_compact")

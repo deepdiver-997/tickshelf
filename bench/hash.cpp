@@ -96,6 +96,7 @@ void Deduper::evict() {
 bool Deduper::apply(std::vector<EncodedRecord>& records, std::string& error) {
     error.clear();
     if (config_.hash == "off") {
+        metrics_.inc("hash_bypassed_records", records.size());
         for (auto& record : records) record.has_sha256 = false;
         return true;
     }
@@ -136,10 +137,12 @@ bool Deduper::apply(std::vector<EncodedRecord>& records, std::string& error) {
     Timer timer(metrics_, "dedup_lookup");
     std::size_t output = 0;
     for (std::size_t i = 0; i < records.size(); ++i) {
+        metrics_.inc("dedup_lookup_records");
         auto found = seen_.find(digests_[i]);
         bool duplicate = false;
         if (found != seen_.end()) {
             for (auto* entry = found->second; entry; entry = entry->next) {
+                metrics_.inc("dedup_candidate_comparisons");
                 if (entry->bytes == records[i].bytes) { duplicate = true; break; }
             }
         }

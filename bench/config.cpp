@@ -49,6 +49,10 @@ bool validate_config(const Config& c, std::string& error) {
         check(one_of(c.backend, {"sqlite", "sqlite_compact", "segment", "segment_rocksdb", "rocksdb", "null"}), "invalid backend") &&
         check(one_of(c.synchronous, {"FULL", "NORMAL"}), "invalid synchronous level") &&
         check(one_of(c.sqlite_fullfsync, {"default", "on", "off"}), "invalid sqlite_fullfsync") &&
+        check(one_of(c.store_lookup, {"exact", "assume_unique"}), "store_lookup must be exact or assume_unique") &&
+        check(c.store_lookup == "exact" || one_of(c.backend, {"sqlite_compact", "rocksdb"}), "store_lookup=assume_unique requires backend=sqlite_compact or rocksdb") &&
+        check(c.store_lookup == "exact" || c.duplicate_every == 0, "store_lookup=assume_unique requires duplicate_every=0 synthetic input") &&
+        check(c.store_lookup == "exact" || c.input_manifest.empty(), "store_lookup=assume_unique does not support capture input_manifest") &&
         check(one_of(c.sqlite_compact_lookup, {"subquery", "separate"}), "invalid sqlite_compact_lookup") &&
         check(c.sqlite_compact_lookup != "separate" || c.backend == "sqlite_compact", "sqlite_compact_lookup=separate requires backend=sqlite_compact") &&
         check((c.backend != "segment" && c.backend != "segment_rocksdb" && c.backend != "rocksdb") || c.synchronous == "FULL", "segment/rocksdb backends require synchronous=FULL") &&
@@ -95,7 +99,7 @@ bool load_config(const std::string& path, Config& out, std::string& error) {
 #define BOOL(name) if (key == #name) { bool v = false; ok = !value.get_bool().get(v); if (ok) c.name = v; known = true; }
         STR(directory) STR(host) STR(redis_host) STR(input) STR(input_file) STR(input_manifest) STR(output_file)
         STR(parse) STR(hash) STR(hash_mode) STR(hash_algorithm) STR(redis) STR(backend)
-        STR(synchronous) STR(transaction_model) STR(failpoint) STR(sqlite_fullfsync) STR(sqlite_compact_lookup)
+        STR(synchronous) STR(transaction_model) STR(failpoint) STR(sqlite_fullfsync) STR(sqlite_compact_lookup) STR(store_lookup)
         NUM(port) NUM(redis_port) NUM(records) NUM(symbols) NUM(depth) NUM(seed)
         NUM(duplicate_every) NUM(batch_records) NUM(hash_batch_records) NUM(redis_batch_records) NUM(rate) NUM(dedup_max_entries)
         NUM(autocheckpoint) NUM(transaction_rows) NUM(transaction_bytes) NUM(transaction_ms) NUM(timeout_s)
@@ -123,7 +127,7 @@ std::string config_json(const Config& c) {
 #define BOOL(name) key(#name); out << (c.name ? "true" : "false");
     STR(directory) STR(host) STR(redis_host) STR(input) STR(input_file) STR(input_manifest) STR(output_file)
     STR(parse) STR(hash) STR(hash_mode) STR(hash_algorithm) STR(redis) STR(backend)
-    STR(synchronous) STR(transaction_model) STR(failpoint) STR(sqlite_fullfsync) STR(sqlite_compact_lookup)
+    STR(synchronous) STR(transaction_model) STR(failpoint) STR(sqlite_fullfsync) STR(sqlite_compact_lookup) STR(store_lookup)
     NUM(port) NUM(redis_port) NUM(records) NUM(symbols) NUM(depth) NUM(seed)
     NUM(duplicate_every) NUM(batch_records) NUM(hash_batch_records) NUM(redis_batch_records) NUM(rate) NUM(dedup_max_entries)
     NUM(autocheckpoint) NUM(transaction_rows) NUM(transaction_bytes) NUM(transaction_ms) NUM(timeout_s)

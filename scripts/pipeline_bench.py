@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 
 from pipeline_bench_anomaly import AnomalyTrigger
+from pipeline_bench_truth import CONTRACT_ID, describe_run, truth_cells, truth_specs, write_truth_report
 from pipeline_bench_processes import BenchmarkProcesses
 from pipeline_bench_syscalls import analyze_trace, preflight as syscall_preflight, prepare_launch
 from pipeline_bench_support import (DEFAULTS, backlog_summary, counter, unique_count,
@@ -176,6 +177,8 @@ def environment(binary, output, work):
     # does not identify the experiment. Record their exact hashes alongside binary.
     source_paths = list((ROOT / "bench").glob("*")) + list((ROOT / "scripts").glob("*pipeline_bench*.py"))
     source_paths += [ROOT / "scripts/pipeline_bench_anomaly.py", ROOT / "scripts/stack_runtime.py", ROOT / "CMakeLists.txt"]
+    # HEAD alone is insufficient while developing uncommitted native components.
+    source_paths += [path for path in (ROOT / "src").rglob("*") if path.suffix in (".cpp", ".hpp")]
     result["source_sha256"] = {str(path.relative_to(ROOT)): sha256_file(path)
                                for path in sorted(set(source_paths)) if path.is_file()}
     cache = binary.parent / "CMakeCache.txt"
@@ -421,6 +424,8 @@ def full_chain_contract(config, input_info=None):
         required.update(depth=5, duplicate_every=0, optional_fields=False)
     violations = {key: {"required": value, "actual": config.get(key)}
                   for key, value in required.items() if config.get(key) != value}
+    if config.get("store_lookup", "exact") != "exact":
+        violations["store_lookup"] = {"required": "exact", "actual": config.get("store_lookup")}
     if config.get("backend") not in ("sqlite", "sqlite_compact", "rocksdb", "segment", "segment_rocksdb"):
         violations["backend"] = {"required": "durable record or segment backend", "actual": config.get("backend")}
     coverage = (input_info or {}).get("coverage")
@@ -436,6 +441,8 @@ def full_chain_contract(config, input_info=None):
         if evidence["kind"] in ("production_shape", "production_capture") and not (evidence["authorization_declared"] and evidence["provenance"]):
             violations["provenance"] = {"required": "explicit authorization and source declaration", "actual": evidence}
     return {"eligible": not violations, "violations": violations, "source": evidence,
+            "delivery_contract": CONTRACT_ID, "record_contract": "experimental-RCD1-v1",
+            "dcrb_compatibility": "not-adapted",
             "coverage_basis": "independently inspected input records" if coverage is not None else "declared synthetic config only; no input inspected",
             "scope": "complete five-level JSON/TCP/SHA/dedup/Redis/FULL under the stated input; no production certification implied"}
 
@@ -481,13 +488,25 @@ def performance_summary(source, receiver, progress, observations, config, durati
     offered = target if target else None
     contract = full_chain_contract(config, input_info)
     end_to_end_rate = unique_records / max(source_s, receiver_s) if durable_rate is not None else None
+    completion_s = max(source_s, receiver_s)
+    input_bytes = (input_info or {}).get("bytes")
+    raw_bytes = (input_info or {}).get("raw_payload_bytes")
+    canonical_bytes = receiver.get("metrics", {}).get("counters", {}).get("canonical_bytes")
     result = {"offered_records_per_s": offered, "actual_source_records_per_s": actual,
+              "end_to_end_input_records_per_s": config["records"] / completion_s,
+              "wire_bytes_per_s": input_bytes / completion_s if input_bytes is not None else None,
+              "raw_payload_bytes_per_s": raw_bytes / completion_s if raw_bytes is not None else None,
+              "canonical_bytes_per_s": canonical_bytes / completion_s if canonical_bytes is not None else None,
+              "completion_denominator_s": completion_s,
+              "measurement_class": describe_run(config, receiver)["measurement_class"],
+              "delivery_contract": CONTRACT_ID, "dcrb_compatibility": "not-adapted",
               "full_chain_contract": contract, "minimum_durable_records_per_s": minimum_durable_rps,
               "end_to_end_durable_unique_records_per_s": end_to_end_rate,
               "source_offer_ratio": actual / target if target else None,
               "receiver_records_per_s_including_drain": config["records"] / receiver_s,
               "durable_unique_records_per_s_including_drain": durable_rate,
-              "durable_unique_count": unique_records, "input_source": source_evidence(input_info),
+              "durable_unique_count": unique_records if durable_rate is not None else None,
+              "validated_input_unique_count": unique_records, "input_source": source_evidence(input_info),
               "source_send_elapsed_s": send_s, "source_ack_elapsed_s": source_s,
               "ack_tail_after_send_s": max(0.0, source_s - send_s),
               "source_schedule": schedule,
@@ -583,6 +602,8 @@ def run_case(binary, case, config, case_dir, input_info, *, stop, args, output, 
         result["startup_directory_sync"] = sync_created_directory(case_dir)
         if dataset is not None:
             dataset.verify_inputs(check=stop.check, deadline=time.monotonic() + args.timeout)
+        elif input_info.get("path") and sha256_file(input_info["path"]) != input_info["sha256"]:
+            raise RunError("controlled input changed before measurement")
         check = command_capture([binary, "--role", "receiver", "--config", config_path, "--print-config"])
         save_json(case_dir / "config-check.json", check)
         if check.get("returncode") != 0:
@@ -593,6 +614,12 @@ def run_case(binary, case, config, case_dir, input_info, *, stop, args, output, 
             if not redis_binary:
                 raise RunError("redis-server not found; full pipeline cannot be silently skipped")
             start_private_redis(owner, redis_binary, redis_port, stop=stop)
+            from stack_runtime import redis_runtime_snapshot
+            result["redis_runtime"] = redis_runtime_snapshot(
+                "127.0.0.1", redis_port, ownership="owned_private",
+                requested={"appendonly": "no", "save": "", "maxmemory": 512 * 1024 * 1024,
+                           "maxmemory-policy": "noeviction"})
+            save_json(case_dir / "redis-runtime.json", result["redis_runtime"])
         receiver_command = [binary, "--role", "receiver", "--config", config_path]
         if trace_enabled:
             launch = prepare_launch(receiver_command, trace_path=case_dir / "receiver.strace", owned_binary=binary,
@@ -645,7 +672,19 @@ def run_case(binary, case, config, case_dir, input_info, *, stop, args, output, 
         result["correctness"] = (dataset.validate_metrics(source_metrics, receiver_metrics, config, check=stop.check)
                                  if dataset is not None else validate_metrics(source_metrics, receiver_metrics, config, input_info))
         result["stage_summary"] = stage_summary(source_metrics, receiver_metrics)
+        result["ablation"] = describe_run(config, receiver_metrics)
+        work_status = result["ablation"]["effective_work"]["status"]
+        if work_status == "failed" or (args.suite == "truth-table" and work_status != "verified"):
+            raise RunError("native effective-work evidence disagrees with the requested path: " +
+                           json.dumps(result["ablation"]["effective_work"]["mismatches"]))
         if config["backend"] == "null":
+            native_counters = receiver_metrics["metrics"]["counters"]
+            if native_counters.get("ablation_work_schema") == 1:
+                expected_checksum = int(result["correctness"]["checksum_fnv1a64"], 16)
+                if (native_counters.get("null_consumed_rows") != counter(receiver_metrics, "forwarded") or
+                        native_counters.get("null_checksum") != expected_checksum or
+                        receiver_metrics.get("store", {}).get("checksum") != expected_checksum):
+                    raise RunError("null sink did not consume the independently expected canonical stream")
             result["oracle"] = {"passed": True, "method": "independent-forwarded-canonical-checksum-and-consume-ACK",
                                 "exports_expected": False, "durability_proved": False}
             if (case_dir / "rows.jsonl").exists():
@@ -703,7 +742,9 @@ def run_case(binary, case, config, case_dir, input_info, *, stop, args, output, 
         if trace_enabled and (case_dir / "receiver.strace").is_file():
             try:
                 db_paths = [case_dir / name for name in ("full-record.sqlite3", "compact-record.sqlite3", "segment-index.sqlite3",
-                                                          "full-record-rocksdb-v1", "segment-rocksdb-v1/index.rocksdb")]
+                                                          "full-record-rocksdb-v1", "segment-rocksdb-v1/index.rocksdb",
+                                                          "sqlite-compact-assume-unique-v1/compact-record.sqlite3",
+                                                          "full-record-rocksdb-assume-unique-v1")]
                 analysis = analyze_trace(case_dir / "receiver.strace", db_paths=db_paths,
                                          segment_paths=[case_dir / "records.segments", case_dir / "segment-rocksdb-v1/records.segments"],
                                          root_pid=owner.target_pids.get("receiver"))
@@ -716,6 +757,15 @@ def run_case(binary, case, config, case_dir, input_info, *, stop, args, output, 
                 result.update(status="failed", diagnostic_error=f"cannot analyze syscall trace: {exc}")
         result["forced_cleanup"] = list(owner.forced)
         result["ended_unix_s"] = time.time()
+        if dataset is None and input_info.get("path"):
+            try:
+                result["input_sha256_after"] = sha256_file(input_info["path"])
+                if result["input_sha256_after"] != input_info.get("sha256"):
+                    result.update(status="failed", error="controlled input changed during the case")
+                    result["correctness"]["passed"] = False
+            except OSError as exc:
+                result.update(status="failed", error=f"cannot verify input after case: {exc}")
+                result["correctness"]["passed"] = False
         try:
             result["binary_sha256_after"] = sha256_file(binary)
             if result["binary_sha256_after"] != result["binary_sha256"]:
@@ -816,7 +866,9 @@ def aggregate(results):
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--build", type=Path, default=ROOT / "build", help="build directory or pipeline_bench executable")
-    result.add_argument("--suite", choices=("smoke", "diagnostic", "target"), default="smoke")
+    result.add_argument("--suite", choices=("smoke", "diagnostic", "target", "truth-table"), default="smoke")
+    result.add_argument("--describe-truth-table", action="store_true",
+                        help="print all 32 logical RCD1 cells without building, creating files, or starting processes")
     result.add_argument("--output", type=Path, help="NEW artifact directory; required except --check-syscalls")
     result.add_argument("--config", help="flat config overrides JSON text or filename; runner owns paths/ports")
     result.add_argument("--capture", type=Path, help="explicit authorized JSON(L) payload file; preserve original bytes, never infer production authenticity")
@@ -854,6 +906,8 @@ def parser():
 
 def prepare_case_input(binary, case, config, fixtures, cache, *, args, stop, output, work):
     dataset = None
+    if config.get("store_lookup", "exact") == "assume_unique" and args.capture:
+        raise RunError("assume_unique is a synthetic-only diagnostic; capture is not eligible")
     if args.capture:
         from pipeline_bench_capture import prepare_capture
         if config["input"] != "json" or config["parse"] != "real" or case.get("source_mode") == "generated_cpp":
@@ -910,6 +964,10 @@ def prepare_case_input(binary, case, config, fixtures, cache, *, args, stop, out
         else:
             config["input_file"] = reference_info["path"]
             info = {**reference_info, "source_mode": "file_replay"}
+    if config.get("store_lookup", "exact") == "assume_unique":
+        if config.get("duplicate_every") != 0 or info.get("unique_records") != info.get("records"):
+            raise RunError("assume_unique requires independently verified zero-duplicate synthetic input")
+        info = {**info, "lookup_diagnostic": "assume_unique; verified synthetic formula and unique canonical count"}
     config["output_file"] = ""
     return config, info, dataset
 
@@ -917,6 +975,17 @@ def prepare_case_input(binary, case, config, fixtures, cache, *, args, stop, out
 def main(argv=None):
     cli = parser()
     args = cli.parse_args(argv)
+    if args.describe_truth_table:
+        try:
+            if args.capture or args.matrix:
+                raise ValueError("describe-truth-table supports the declared synthetic profile, not capture/custom matrices")
+            print(json.dumps({"schema": "tickshelf.rcd1-truth-plan.v1", "delivery_contract": CONTRACT_ID,
+                              "production_qualified": False, "dcrb_compatibility": "not-adapted",
+                              "cells": truth_cells({**DEFAULTS, **config_overrides(args.config)})},
+                             indent=2, allow_nan=False))
+            return 0
+        except (OSError, ValueError, TypeError) as exc:
+            cli.error(str(exc))
     if args.check_syscalls:
         capability = syscall_preflight()
         cleanup_supported = hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
@@ -985,6 +1054,12 @@ def main(argv=None):
         if base["dedup_max_entries"] <= 0:
             raise ValueError("dedup_max_entries must be positive")
         base["timeout_s"] = math.ceil(args.timeout)
+        if args.suite == "truth-table":
+            if args.matrix or args.capture or args.include_normal or args.compare_profiles:
+                raise ValueError("truth-table uses its own fixed-contract matrix; capture, --matrix and appended comparison cells are not supported")
+            custom_specs = truth_specs(base)
+        if base.get("store_lookup", "exact") == "assume_unique" and (args.capture or base["duplicate_every"] != 0):
+            raise ValueError("assume_unique requires zero-duplicate synthetic input and cannot replay capture")
         repeats = args.repeat if args.repeat is not None else (3 if args.suite == "diagnostic" else 1)
         if not 1 <= repeats <= 20:
             raise ValueError("repeat must be 1..20")
@@ -1017,6 +1092,9 @@ def main(argv=None):
                "disk_budget_bytes": args.max_disk_mib * 1024 * 1024,
                "reserve_free_bytes": args.reserve_free_mib * 1024 * 1024,
                "status": "running", "results": results,
+               "delivery_contract": CONTRACT_ID, "record_contract": "experimental-RCD1-v1",
+               "dcrb_compatibility": "not-adapted",
+               "measurement_class": "ablation-matrix" if args.suite == "truth-table" else "configured-experiment",
                "limitations": ["Experimental IQB1 transport, not an official iQuant wire format.",
                                "No physical power-loss proof; ACK durable is backend sync completion only.",
                                "Sampling requires inspecting saved artifacts before claiming CPU hotspots.",
@@ -1030,7 +1108,11 @@ def main(argv=None):
         specs = list(custom_specs if custom_specs is not None else
                      DIAGNOSTIC[:1] if args.capture else
                      SMOKE if args.suite == "smoke" else DIAGNOSTIC if args.suite == "diagnostic" else DIAGNOSTIC[:1])
-        summary["matrix"] = {"path": str(args.matrix.resolve()), "sha256": sha256_file(args.matrix)} if args.matrix else "built-in"
+        summary["matrix"] = ({"kind": "logical-PHDRS", "logical_cells": 32, "legal_cells": 24}
+                             if args.suite == "truth-table" else
+                             {"path": str(args.matrix.resolve()), "sha256": sha256_file(args.matrix)} if args.matrix else "built-in")
+        if args.suite == "truth-table":
+            write_truth_report(output, base, results, repeats)
         if args.include_normal:
             specs.append(("sqlite_normal_weaker_durability", {"synchronous": "NORMAL"}))
         if args.compare_profiles:
@@ -1077,12 +1159,18 @@ def main(argv=None):
                 summary["groups"] = aggregate(results)
                 save_json(output / "summary.json", summary)
                 save_results_csv(output / "results.csv", results)
+                if args.suite == "truth-table":
+                    write_truth_report(output, base, results, repeats)
                 print(f"{case['name']} repeat={case['repeat']} {result['status']} {case_dir}", flush=True)
                 if result.get("interrupted"):
                     raise InterruptedError("stop requested")
                 enforce_budget([output, work], args.max_disk_mib * 1024 * 1024, args.reserve_free_mib * 1024 * 1024)
         summary["correctness_passed"] = bool(results) and all(result.get("correctness", {}).get("passed") is True for result in results)
         summary["execution_passed"] = bool(results) and all(result["status"] == "passed" for result in results)
+        if args.suite == "truth-table":
+            table = write_truth_report(output, base, results, repeats)
+            summary["truth_table_passed"] = table["all_legal_rows_passed"]
+            summary["execution_passed"] = summary["execution_passed"] and summary["truth_table_passed"]
         summary["diagnostics_passed"] = all(result.get("syscalls", {}).get("status") in ("ok", "not-requested") for result in results)
         target_results = [result for result in results if not result.get("warmup")]
         summary["target_passed"] = (all(result.get("performance", {}).get("verdict") in ("pass-bounded-target-observation", "pass-full-chain-capacity")
@@ -1096,6 +1184,8 @@ def main(argv=None):
         summary["ended_unix_s"] = time.time()
         save_json(output / "summary.json", summary)
         save_results_csv(output / "results.csv", results)
+        if args.suite == "truth-table":
+            write_truth_report(output, base, results, repeats)
     if summary["status"] != "passed":
         print(f"benchmark failed; artifacts retained at {output / 'summary.json'}", file=sys.stderr)
         return 1

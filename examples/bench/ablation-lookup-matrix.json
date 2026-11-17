@@ -1,0 +1,8 @@
+{
+  "cases": [
+    {"name": "compact_exact", "set": {"backend": "sqlite_compact", "sqlite_compact_lookup": "separate", "store_lookup": "exact"}},
+    {"name": "compact_assume_unique_diagnostic", "set": {"backend": "sqlite_compact", "sqlite_compact_lookup": "separate", "store_lookup": "assume_unique"}},
+    {"name": "rocks_exact", "set": {"backend": "rocksdb", "sqlite_compact_lookup": "subquery", "store_lookup": "exact"}},
+    {"name": "rocks_assume_unique_diagnostic", "set": {"backend": "rocksdb", "sqlite_compact_lookup": "subquery", "store_lookup": "assume_unique"}}
+  ]
+}

@@ -276,6 +276,7 @@ StoreOptions store_options(const Config& c) {
         static_cast<int>(c.autocheckpoint), c.failpoint};
     options.fullfsync = c.sqlite_fullfsync;
     options.sqlite_compact_lookup = c.sqlite_compact_lookup;
+    options.store_lookup = c.store_lookup;
     return options;
 }
 std::string result_json(const Config& c, const std::string& role, const std::string& status,

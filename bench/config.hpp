@@ -27,6 +27,8 @@ struct Config {
     std::uint64_t transaction_bytes = 1048576;
     std::uint32_t transaction_ms = 100, timeout_s = 120;
     std::string failpoint;
+    // assume_unique is a synthetic zero-repeat diagnostic, not an exact store.
+    std::string store_lookup = "exact";  // exact | assume_unique
 };
 bool load_config(const std::string& path, Config& out, std::string& error);
 bool validate_config(const Config& config, std::string& error);

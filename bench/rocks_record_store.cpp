@@ -129,6 +129,8 @@ public:
     RocksRecordStore(StoreOptions options, Metrics& metrics) : options_(std::move(options)), metrics_(metrics) {
         for (const char* key : {"attempted", "inserted", "ignored", "transactions", "payload_bytes",
                  "store_digest_cache_hits", "store_digest_computed", "store_digest_bytes", "store_digest_override_calls",
+                 "backend_digest_recomputed", "backend_digest_cached", "backend_lookup_calls", "backend_candidates",
+                 "backend_inserted", "backend_ignored",
                  "rocksdb_write_batches", "rocksdb_write_calls", "rocksdb_put_ops", "rocksdb_key_bytes",
                  "rocksdb_value_bytes", "rocksdb_writebatch_bytes", "rocksdb_payload_value_bytes",
                  "rocksdb_get_calls", "rocksdb_seek_calls", "rocksdb_iterator_creations", "rocksdb_dedup_candidate_rows",
@@ -137,8 +139,11 @@ public:
                  "symbol_index_rows", "time_symbol_index_rows", "metadata_kv_rows", "rocksdb_state_rows",
                  "sqlite_prepare_calls", "sqlite_step_calls", "file_write_calls", "file_write_bytes", "file_sync_calls"})
             metrics_.counters.try_emplace(key, 0);
+        metrics_.counters["backend_lookup_exact"] = !assume_unique();
+        metrics_.counters["backend_lookup_assume_unique"] = assume_unique();
+        metrics_.counters["backend_candidates_observable"] = 1;
         const auto base = store_detail::prepare_directory(options_.directory);
-        path_ = base / "full-record-rocksdb-v1";
+        path_ = base / (assume_unique() ? "full-record-rocksdb-assume-unique-v1" : "full-record-rocksdb-v1");
         const bool existed = fs::exists(path_);
         const bool current = fs::exists(path_ / "CURRENT");
         if (existed && !fs::is_directory(path_)) fail("RocksDB full-record path is not a directory");
@@ -200,7 +205,7 @@ public:
             struct Bucket { std::vector<std::string> stored; std::vector<std::string_view> pending; };
             std::unordered_map<std::string, Bucket> buckets;
             rocksdb::WriteBatch batch;
-            auto it = iterator(false, true);
+            auto it = assume_unique() ? std::unique_ptr<rocksdb::Iterator>{} : iterator(false, true);
             std::uint64_t inserted = 0, payload = 0, put_ops = 0, key_bytes = 0, value_bytes = 0;
             const auto put = [&](const std::string& key, std::string_view value) {
                 check(batch.Put(key, rocksdb::Slice(value.data(), value.size())), "batch Put");
@@ -210,28 +215,32 @@ public:
                 Timer timer(metrics_, "rocksdb_batch_prepare");
                 for (const auto& record : records) {
                     const auto digest = digest_bytes(store_detail::record_digest(record, options_, metrics_));
-                    auto [entry, first] = buckets.try_emplace(digest);
-                    auto& bucket = entry->second;
                     const auto prefix = "D" + digest;
-                    if (first) {
-                        metrics_.inc("rocksdb_seek_calls");
-                        for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next()) {
-                            if (it->key().size() != 41) fail("malformed RocksDB digest/record ID key");
-                            bucket.stored.push_back(it->value().ToString());
-                            metrics_.inc("rocksdb_dedup_candidate_rows");
-                            metrics_.inc("rocksdb_dedup_iterator_steps");
+                    if (!assume_unique()) {
+                        auto [entry, first] = buckets.try_emplace(digest);
+                        auto& bucket = entry->second;
+                        if (first) {
+                            metrics_.inc("rocksdb_seek_calls");
+                            metrics_.inc("backend_lookup_calls");
+                            for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next()) {
+                                if (it->key().size() != 41) fail("malformed RocksDB digest/record ID key");
+                                bucket.stored.push_back(it->value().ToString());
+                                metrics_.inc("rocksdb_dedup_candidate_rows");
+                                metrics_.inc("backend_candidates");
+                                metrics_.inc("rocksdb_dedup_iterator_steps");
+                            }
+                            check(it->status(), "digest candidate iterator");
                         }
-                        check(it->status(), "digest candidate iterator");
+                        if (std::find(bucket.pending.begin(), bucket.pending.end(), record.bytes) != bucket.pending.end()) {
+                            metrics_.inc("rocksdb_dedup_pending_hits");
+                            continue;
+                        }
+                        if (std::find(bucket.stored.begin(), bucket.stored.end(), record.bytes) != bucket.stored.end()) continue;
+                        bucket.pending.emplace_back(record.bytes);
                     }
-                    if (std::find(bucket.pending.begin(), bucket.pending.end(), record.bytes) != bucket.pending.end()) {
-                        metrics_.inc("rocksdb_dedup_pending_hits");
-                        continue;
-                    }
-                    if (std::find(bucket.stored.begin(), bucket.stored.end(), record.bytes) != bucket.stored.end()) continue;
                     next.last_id = add(next.last_id, 1);
                     payload = add(payload, record.bytes.size());
                     ++inserted;
-                    bucket.pending.emplace_back(record.bytes);
                     put(prefix + be(next.last_id), record.bytes);
                     put(range_key(record, next.last_id), digest);
                     if (heavy()) put(heavy_key(record.symbol, record.time, next.last_id), digest);
@@ -260,6 +269,8 @@ public:
             ++transactions_;
             metrics_.inc("inserted", inserted);
             metrics_.inc("ignored", records.size() - inserted);
+            metrics_.inc("backend_inserted", inserted);
+            metrics_.inc("backend_ignored", records.size() - inserted);
             metrics_.inc("transactions");
             metrics_.inc("payload_bytes", canonical_bytes);
             metrics_.inc("rocksdb_write_batches");
@@ -369,8 +380,13 @@ public:
         std::ostringstream out;
         out << "{\"backend\":\"rocksdb\",\"durable\":true,\"physical_power_loss_tested\":false,\"hardware_plp\":\"unknown\","
             << "\"database\":" << json_quote(path_.string()) << ",\"transaction_model\":" << json_quote(options_.transaction_model)
+            << ",\"store_lookup\":" << json_quote(options_.store_lookup)
+            << (assume_unique() ? ",\"production\":false,\"synthetic_only\":true,\"uniqueness_contract\":\"prevalidated zero-repeat synthetic input only; writes retain every physical row; independent export oracle and strict reopen detect repeats\"" : "")
+            << ",\"backend_lookup_metric_scope\":\"workload only, excluding recovery/export; lookup_calls counts persisted digest-prefix candidate Seeks (one per distinct digest per batch); candidates counts persisted payload rows returned for C++ exact comparison; pending hits are separately counted by rocksdb_dedup_pending_hits\""
             << ",\"payload_location\":\"RocksDB D values contain complete canonical records; no external segment files\","
-            << "\"deduplication\":\"nonunique fixed32 SHA-256 prefix candidates, exact full canonical byte equality only; pending batch cache\","
+            << "\"deduplication\":" << json_quote(assume_unique() ?
+                "none; synthetic zero-repeat assume_unique diagnostic; no candidate iterator, Seek or pending dedup; nonunique SHA-256/id keys retained" :
+                "nonunique fixed32 SHA-256 prefix candidates, exact full canonical byte equality only; pending batch cache") << ','
             << "\"digest_cache_contract\":\"shared store_digest; trusted EncodedRecord SHA256 only while bytes unchanged; test override takes precedence\","
             << "\"writer_model\":\"one DB writer handle; mutex covers dedup read through synchronous WriteBatch; DB LOCK rejects independent writers; not TransactionDB or multi-writer transactions\","
             << "\"schema_cost\":" << json_quote(heavy() ?
@@ -381,7 +397,7 @@ public:
             << "\"input_validation\":\"same trusted-codec canonical header/64MiB batch boundary as SQLite; recovery fully decodes all payloads and validates both directions of every index\","
             << "\"sync_method\":\"RocksDB WAL sync=true,use_fsync=true\","
             << "\"durability_scope\":\"synchronous WAL atomic WriteBatch with OS sync; no physical power-loss or hardware PLP claim\","
-            << "\"physical_rows\":" << actual_number(state_.last_id) << ",\"physical_duplicate_rows\":" << actual_number(0)
+            << "\"physical_rows\":" << actual_number(state_.last_id) << ",\"physical_duplicate_rows\":" << (assume_unique() ? "null" : actual_number(0))
             << ",\"symbol_index_rows\":" << actual_number(state_.last_id)
             << ",\"time_symbol_index_rows\":" << actual_number(heavy() ? state_.last_id : 0)
             << ",\"batch_metadata_rows\":" << actual_number(heavy() ? state_.batches : 0)
@@ -428,7 +444,11 @@ private:
     bool poisoned_ = false, finished_ = false;
     std::string debt_after_writes_ = "null", debt_after_flush_ = "null", debt_after_compact_ = "null", debt_before_close_ = "null";
     bool heavy() const { return options_.transaction_model == "heavy"; }
-    std::string stamp() const { return "tickshelf-bench/full-record-rocksdb/v1/RCD1/" + options_.transaction_model; }
+    bool assume_unique() const { return options_.store_lookup == "assume_unique"; }
+    std::string stamp() const {
+        return std::string(assume_unique() ? "tickshelf-bench/full-record-rocksdb-assume-unique/v1/RCD1/" :
+            "tickshelf-bench/full-record-rocksdb/v1/RCD1/") + options_.transaction_model;
+    }
     void available() const { if (poisoned_ || !db_) fail("RocksDB full-record store requires reopen after a failed write/finish"); }
     void crash_at(std::string_view site) const {
         if (options_.failpoint != site) return;

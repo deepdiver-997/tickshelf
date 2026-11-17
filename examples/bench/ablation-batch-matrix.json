@@ -1,0 +1,8 @@
+{
+  "cases": [
+    {"name": "compact_rows1000", "set": {"backend": "sqlite_compact", "sqlite_compact_lookup": "separate", "transaction_rows": 1000}},
+    {"name": "compact_rows8192", "set": {"backend": "sqlite_compact", "sqlite_compact_lookup": "separate", "transaction_rows": 8192}},
+    {"name": "rocks_rows1000", "set": {"backend": "rocksdb", "sqlite_compact_lookup": "subquery", "transaction_rows": 1000}},
+    {"name": "rocks_rows8192", "set": {"backend": "rocksdb", "sqlite_compact_lookup": "subquery", "transaction_rows": 8192}}
+  ]
+}

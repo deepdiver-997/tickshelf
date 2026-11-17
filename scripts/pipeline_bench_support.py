@@ -35,7 +35,7 @@ DEFAULTS = {
     "hash": "dedup", "hash_mode": "batch", "hash_algorithm": "sha256",
     "dedup_max_entries": 1000000, "redis": "roundtrip", "backend": "sqlite",
     "synchronous": "FULL", "transaction_model": "light", "reuse_statement": True,
-    "sqlite_fullfsync": "default", "sqlite_compact_lookup": "subquery",
+    "sqlite_fullfsync": "default", "sqlite_compact_lookup": "subquery", "store_lookup": "exact",
     "autocheckpoint": 1000, "transaction_rows": 1000, "transaction_bytes": 1048576,
     "transaction_ms": 100, "timeout_s": 120, "failpoint": "",
 }
@@ -190,6 +190,7 @@ def write_input(path, config, stop=None):
     batch_start = 0
     digest = hashlib.sha256()
     size = 0
+    raw_payload_bytes = canonical_bytes = 0
     observed_symbols = set()
     full_baseline = 0
     baseline_mask = ((1 << 12) - 1) | (15 << 13)
@@ -201,6 +202,7 @@ def write_input(path, config, stop=None):
             size += len(data)
 
         def emit_batch():
+            nonlocal raw_payload_bytes
             if config["input"] == "json":
                 payload = ('{"ticks":[' + ",".join(record_json(r) for r, _ in batch) + "]}").encode()
                 kind = 1
@@ -209,6 +211,7 @@ def write_input(path, config, stop=None):
                 kind = 2
             if len(payload) > 4 * 1024 * 1024:
                 raise RunError("generated frame exceeds 4MiB; reduce batch_records")
+            raw_payload_bytes += len(payload)
             emit(frame(kind, batch_start, payload))
 
         for sequence in range(config["records"]):
@@ -220,6 +223,7 @@ def write_input(path, config, stop=None):
             if record.present & baseline_mask == baseline_mask and not record.nulls & baseline_mask and all(len(book) == 5 for book in record.book):
                 full_baseline += 1
             raw = encode_record(record)
+            canonical_bytes += len(raw)
             all_checksum = fnv_update(all_checksum, raw)
             if record_id != previous:
                 # The duplicate formula is monotone, so equal IDs are adjacent.
@@ -236,6 +240,7 @@ def write_input(path, config, stop=None):
         emit(frame(3, config["records"]))
     return {"path": str(Path(path).resolve()), "sha256": digest.hexdigest(), "bytes": size,
             "records": config["records"], "unique_records": unique_count(config),
+            "raw_payload_bytes": raw_payload_bytes, "canonical_bytes": canonical_bytes,
             "checksum_all": f"{all_checksum:016x}", "checksum_unique": f"{unique_checksum:016x}",
             "generator": "independent-python-record.hpp-formula", "input": config["input"],
             "source": {"kind": "synthetic", "provenance": "deterministic record.hpp formula, not production capture", "authorized": False},
@@ -386,6 +391,13 @@ def validate_metrics(source, receiver, config, input_info):
         if type(ack.get(key)) is not int or ack[key] != expected[key]:
             raise RunError(f"ACK counter mismatch {key}")
     checksum = input_info["checksum_unique" if config["hash"] == "dedup" else "checksum_all"]
+    if config["backend"] == "null" and receiver["metrics"]["counters"].get("ablation_work_schema") == 1:
+        if counter(receiver, "null_consumed_rows") != expected_forwarded:
+            raise RunError("null sink consumed row count differs from independent forwarded count")
+        if counter(receiver, "null_checksum") != int(checksum, 16):
+            raise RunError("null sink byte checksum differs from independent canonical stream")
+        if store.get("consumed_rows") != expected_forwarded or store.get("checksum") != int(checksum, 16):
+            raise RunError("null store metadata differs from independent canonical stream")
     if ack.get("checksum_fnv1a64") != checksum:
         raise RunError(f"ACK canonical checksum mismatch: got {ack.get('checksum_fnv1a64')}, expected {checksum}")
     return {"passed": True, "counters": checks, "ack_durable": durable,

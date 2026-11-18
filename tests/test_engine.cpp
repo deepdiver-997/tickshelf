@@ -189,6 +189,34 @@ Harness make_harness(EngineConfig config) {
     return harness;
 }
 
+// 流水线（ADR-028）：每分片两条 Redis 连接——[0] 发布，[1] finish/release。
+struct PipeHarness {
+    std::unique_ptr<Engine> engine;
+    FakeRedis* publish = nullptr;
+    FakeRedis* finish = nullptr;
+    FakeStorage* storage = nullptr;
+};
+
+PipeHarness make_pipeline_harness(EngineConfig config) {
+    config.pipeline = true;
+    config.write_mode = WriteMode::WriteThrough;
+    auto publish = std::make_unique<FakeRedis>();
+    auto finish = std::make_unique<FakeRedis>();
+    auto storage = std::make_unique<FakeStorage>();
+    PipeHarness harness;
+    harness.publish = publish.get();
+    harness.finish = finish.get();
+    harness.storage = storage.get();
+    std::vector<std::unique_ptr<RedisShard>> redis_shards;
+    redis_shards.push_back(std::move(publish));
+    redis_shards.push_back(std::move(finish));
+    std::vector<std::unique_ptr<StorageShard>> storage_shards;
+    storage_shards.push_back(std::move(storage));
+    harness.engine = std::make_unique<Engine>(std::move(config), std::move(redis_shards),
+                                              std::move(storage_shards));
+    return harness;
+}
+
 }  // namespace
 
 TEST_CASE("Engine: 仅发布模式封口/发布/完成") {
@@ -629,4 +657,124 @@ TEST_CASE("Engine: storage-only Null sink 记 sink_consumed 而非耐久") {
     CHECK(report.sink_consumed_records == 2);
     CHECK(report.committed_input_records == 0);
     CHECK(report.inserted_unique_records == 0);
+}
+
+TEST_CASE("Engine: pipeline 两级写穿——发布与存储经交接队列各自完成") {
+    auto harness = make_pipeline_harness(config_for(WriteMode::WriteThrough));
+    const std::vector<Tick> ticks = {make_tick("P", 1), make_tick("P", 2),
+                                     make_tick("P", 3), make_tick("P", 4)};
+    REQUIRE(harness.engine->submit(ticks, 0) == 4);
+    const auto report = harness.engine->drain(2000ms);
+    CHECK(report.queue_complete);
+    CHECK(report.storage_complete);
+    CHECK(report.committed_input_records == 4);
+    CHECK(report.inserted_unique_records == 4);
+    CHECK(report.published_records == 4);
+    CHECK(report.pending_records == 0);
+    CHECK(harness.storage->stored_records() == 4);
+    // 发布连接只做 publish/claim；finish 只出现在第二条连接上。
+    CHECK(harness.publish->published_records() == 4);
+    CHECK(harness.publish->finished_count() == 0);
+    CHECK(harness.finish->finished_count() > 0);
+    const auto stats = harness.engine->stats();
+    CHECK(stats.degraded_records == 0);
+    CHECK(stats.skipped_records == 0);
+    CHECK(stats.finish_pending_records == 0);
+    CHECK(stats.retries == 0);
+}
+
+TEST_CASE("Engine: pipeline 发布失败重试后成功，计数与单级一致") {
+    auto harness = make_pipeline_harness(config_for(WriteMode::WriteThrough));
+    harness.publish->fail_publish.store(2);
+    const std::vector<Tick> ticks = {make_tick("Q", 1), make_tick("Q", 2)};
+    REQUIRE(harness.engine->submit(ticks, 0) == 2);
+    const auto report = harness.engine->drain(2000ms);
+    CHECK(report.storage_complete);
+    CHECK(report.committed_input_records == 2);
+    CHECK(harness.engine->stats().retries == 2);
+    CHECK(harness.publish->publish_calls.load() == 3);
+}
+
+TEST_CASE("Engine: pipeline 存储失败在 finish 连接 release 并计 degraded") {
+    auto harness = make_pipeline_harness(config_for(WriteMode::WriteThrough));
+    harness.storage->fail_times.store(1);
+    const std::vector<Tick> ticks = {make_tick("R", 1), make_tick("R", 2)};
+    REQUIRE(harness.engine->submit(ticks, 0) == 2);
+    const auto report = harness.engine->drain(2000ms);
+    CHECK_FALSE(report.storage_complete);
+    CHECK(report.degraded_records == 2);
+    CHECK(report.committed_input_records == 0);
+    CHECK(harness.storage->calls.load() == 1);
+    // release 只发生在 finish 连接：发布连接的租约数据交给 persister 补偿。
+    CHECK(harness.finish->released_count() == 1);
+    CHECK(harness.publish->released_count() == 0);
+}
+
+TEST_CASE("Engine: pipeline 交接队列容量为 1 时阻塞不丢片") {
+    auto config = config_for(WriteMode::WriteThrough);
+    config.inflight = 1;  // ready 与 handoff 都只有 1 个槽位
+    config.batch_records = 1;
+    auto harness = make_pipeline_harness(config);
+    const std::vector<Tick> ticks = {make_tick("S", 1), make_tick("S", 2),
+                                     make_tick("S", 3), make_tick("S", 4)};
+    // 背压语义：submit 只接收前缀，调用方（同 daemon）循环重交尾部。
+    std::size_t accepted = 0;
+    while (accepted < ticks.size()) {
+        harness.engine->tick(0);
+        accepted += harness.engine->submit(std::span<const Tick>(ticks).subspan(accepted), 0);
+        if (accepted < ticks.size()) harness.engine->wait_idle(1ms);
+    }
+    const auto report = harness.engine->drain(5000ms);
+    CHECK(report.queue_complete);
+    CHECK(report.storage_complete);
+    CHECK(report.committed_input_records == 4);
+    CHECK(harness.storage->stored_records() == 4);
+}
+
+TEST_CASE("Engine: pipeline claim 过滤——未认领批计 skipped，落库只认 mine") {
+    auto harness = make_pipeline_harness(config_for(WriteMode::WriteThrough));
+    harness.publish->claim_first_only = true;  // 每片只有第一个 symbol 批被认领
+    // batch_records=2 + 双 symbol：每片两个批，各 1 条。
+    const std::vector<Tick> ticks = {make_tick("V", 1), make_tick("W", 1),
+                                     make_tick("V", 2), make_tick("W", 2)};
+    REQUIRE(harness.engine->submit(ticks, 0) == 4);
+    const auto report = harness.engine->drain(2000ms);
+    CHECK(report.committed_input_records == 2);
+    CHECK(harness.engine->stats().skipped_records == 2);
+    CHECK(harness.storage->stored_records() == 2);
+}
+
+TEST_CASE("Engine: pipeline 拒绝非写穿模式") {
+    std::vector<std::unique_ptr<RedisShard>> redis;
+    redis.push_back(std::make_unique<FakeRedis>());
+    redis.push_back(std::make_unique<FakeRedis>());
+    std::vector<std::unique_ptr<StorageShard>> storage;
+    storage.push_back(std::make_unique<FakeStorage>());
+    auto publish_only = config_for(WriteMode::PublishOnly);
+    publish_only.pipeline = true;
+    CHECK_THROWS_AS(Engine(publish_only, std::move(redis), {}),
+                    std::invalid_argument);
+    auto storage_only = config_for(WriteMode::StorageOnly);
+    storage_only.pipeline = true;
+    CHECK_THROWS_AS(Engine(storage_only, {}, std::move(storage)),
+                    std::invalid_argument);
+}
+
+TEST_CASE("Engine: pipeline 发布阻塞时 drain 中断放弃且存储线程未提交") {
+    auto harness = make_pipeline_harness(config_for(WriteMode::WriteThrough));
+    harness.publish->block.store(true);
+    const std::vector<Tick> ticks = {make_tick("U", 1), make_tick("U", 2)};
+    REQUIRE(harness.engine->submit(ticks, 0) == 2);
+    std::thread release([&] {
+        std::this_thread::sleep_for(50ms);
+        harness.publish->unblock();
+    });
+    const auto report = harness.engine->drain(20ms);
+    release.join();
+    CHECK_FALSE(report.queue_complete);
+    CHECK_FALSE(report.storage_complete);
+    CHECK(report.pending_records == 2);
+    CHECK(harness.storage->calls.load() == 0);
+    // 流水线不泄漏线程：析构（已 stopped）不再 join 阻塞中的 worker。
+    harness.engine.reset();
 }

@@ -59,6 +59,8 @@ const Spec kSchema[] = {
     {"tickshelfd", "engine", "--engine", "engine", kDaemon, &Options::engine, nullptr},
     {"tickshelfd", "raw_journal", "--raw-journal", "raw_journal", kDaemon, &Options::raw_journal,
      nullptr},
+    {"tickshelfd", "engine_pipeline", "--engine-pipeline", "engine_pipeline", kDaemon,
+     &Options::engine_pipeline, nullptr},
     {"tickshelfd", "engine_batch_records", "--engine-batch-records", "engine_batch_records", kDaemon,
      &Options::engine_batch_records, "N", 1},
     {"tickshelfd", "engine_batch_bytes", "--engine-batch-bytes", "engine_batch_bytes", kDaemon,

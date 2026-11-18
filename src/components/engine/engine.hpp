@@ -54,6 +54,7 @@ public:
 struct EngineConfig {
     std::size_t shards = 1;
     WriteMode write_mode = WriteMode::PublishOnly;
+    bool pipeline = false;                    // ADR-028：写穿两级流水线（仅 WriteThrough 合法）
     std::uint64_t batch_records = 8192;       // 软上限：按 (symbol,date) 分组后可能略超
     std::uint64_t batch_bytes = 4ull << 20;   // 0 = 不按字节封口
     std::uint64_t batch_ms = 100;             // 0 = 只按容量封口
@@ -127,6 +128,10 @@ struct DrainReport {
 
 class Engine {
 public:
+    // pipeline=false：每分片 [index] 一条 Redis 连接（publish+finish 共用）。
+    // pipeline=true（ADR-028，仅 WriteThrough）：每分片两条——[index] 为发布
+    // 连接，[shards+index] 为该分片 storage worker 的 finish/release 连接；
+    // 发布 RTT 与 SQLite 提交在不同线程重叠。
     Engine(EngineConfig config, std::vector<std::unique_ptr<RedisShard>> redis,
            std::vector<std::unique_ptr<StorageShard>> storage);
     ~Engine();
@@ -156,9 +161,17 @@ public:
 
 private:
     struct Shard;
+    struct Handoff;
 
-    void worker_loop(Shard& shard);
-    void process(Shard& shard, const SlicePtr& slice);
+    void worker_loop(Shard& shard);         // 单级模式：发布+存储同一线程
+    void publish_loop(Shard& shard);        // 流水线第一级：发布/认领
+    void storage_loop(Shard& shard);        // 流水线第二级：提交/finish
+    // 返回 false = 停止中被放弃（slice 保持 pending，租约由 TTL 收尾）。
+    bool publish_slice(Shard& shard, const SlicePtr& slice, std::vector<char>& claimed);
+    void store_slice(Shard& shard, const SlicePtr& slice, std::vector<char> claimed);
+    bool handoff_push(Shard& shard, SlicePtr slice, std::vector<char> claimed);
+    RedisShard& publish_port(Shard& shard);
+    RedisShard& finish_port(Shard& shard);
     void seal(Shard& shard, std::uint64_t now_ms);
     void complete(Shard& shard, const SlicePtr& slice);
     bool can_accept(const Shard& shard) const;

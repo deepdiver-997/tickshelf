@@ -253,6 +253,14 @@
 - **拒绝的替代**：查询时 digest 校验兜底（把静默损坏升级为可检测丢失，但违反"提交后不允许错误"）；先提交索引再补 raw（顺序颠倒使第三象限成立）；每批一次水位落盘（多一次 fsync，收益只是重放更短）。
 - **边界**：仅限 `--engine --persist storage --raw-journal` 单写者路径；写穿以 Redis 租约为恢复权威不叠加。raw 同步不是跨资源事务，故障窗口语义见 [delivery-contract §4.1](delivery-contract.md)。macOS fsync 的 barrier 语义不做断言，能探测到 F_FULLFSYNC 时使用之。分布式拓扑的 raw 所有权与水位语义在合同 §8 声明为边界，不实现。
 
+## ADR-028 写穿两级流水线：发布 RTT 与存储提交重叠（2026-11-18）
+
+- **背景**：写穿 worker 串行执行 publish_and_claim（Redis RTT）→ upsert_flush（SQLite 提交）→ finish（Redis RTT）；SQLite 提交期间网络空闲、等 RTT 期间存储空闲。消融表显示两段都是真实成本（54k 单轮：Redis 段 wall ≈9%、存储段更大）。ADR-025 的 send/collect 解耦为此预留了接缝。
+- **决定**：`EngineConfig::pipeline`（`--engine-pipeline`，仅 `--engine --persist sqlite`）：每分片两级线程——发布线程 `ready` 队列 pop → publish_and_claim（重试/退避不变）→ 有界 `handoff` 队列（容量=inflight）→ 存储线程 mine 过滤/upsert/finish。存储线程用**第二条 Redis 连接**做 finish/release（RESP 客户端非线程安全，不共享；租约状态在 Redis 服务端，跨连接无碍）。切片是共享指针，tick 数据不过队列。发布线程或存储线程放弃（停止/交接队列关闭）时切片保持 pending 计数，与单级模式同语义；`queue_depth`/`queue_peak` 覆盖两级。
+- **拒绝的替代**：单线程合并 finish+下一片 publish 的 collect（只省 RTT 不重叠 SQLite）；finish 经命令队列绕回发布连接（跨线程确认通道比第二条连接更复杂）。不默认开启：先以 native 套件同口径实测，确认收益与稳定性后再考虑改默认。
+- **边界**：流水线不减少任何工作，只重叠等待；吞吐上界仍是两段中较慢的一段（Little 定律）。`inflight` 翻倍内存语义（ready+handoff 各 inflight 个切片）。finish 晚于提交的合同语义不变（finish_pending 单独计数）。NullRedis/NullStorage 组合在流水线下行为与单级一致。
+- **首轮实测（2026-11-18，Mac、10k 条/64 证券/2 分片/批 256、每格独立 warmup、单轮）**：native 十六格全 PASS，但方向分化——I/O 等待主导的格 pipeline=on 明显更快（real+null：558k→728k 条/s；null+sqlite FIFO on：679k→729k），而 **real+sqlite 关键格反而慢约 8–30%**（397k→309k、331k→282k）。原因：该规模下 SQLite 提交每批仅亚毫秒，两级交接的锁/唤醒开销与第二条连接成本占比超过重叠收益。结论与决定一致：**保持默认关**；当存储提交变重（更大批量、FULL 同步、数毫秒级）时重叠收益才可能显现，需在目标负载同口径重测后再评估。单轮小样本不构成吞吐结论。
+
 ## 数据模型（Redis）
 
 - ~~行情键 `ts:{symbol}:{yyyymmdd}`（v1 逐 tick ZSET，member=64B Tick 原始字节）~~ — ADR-017 起退役（dev 期 flag-day 换段式；生产期格式迁移走 ADR-018 双读配方）

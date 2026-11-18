@@ -88,7 +88,7 @@ python3 scripts/pipeline_bench.py --build build-record-release \
 
 这只能测“去掉这项义务后少做多少工作”，不能把它当成可上线的等价提速。真正的候选优化必须回到 exact、完整路径、同输入和同同步强度后再验证。
 
-## Tick64 / Engine：真实组件八格
+## Tick64 / Engine：真实组件十六格
 
 原生诊断目标仅在 `TICKSHELF_BUILD_BENCHMARKS=ON` 时构建，不向生产守护进程暴露 Null/造数开关：
 
@@ -100,8 +100,9 @@ python3 scripts/engine_bench.py --suite native --build build-bench-release \
   --max-disk-mib 2048 --reserve-free-mib 10240
 ```
 
-八格为 Redis real/null × Storage sqlite/null × FIFO off/on。输入是独立 Python 生成的完整 64B LE Tick 文件，所有格共享前后 SHA；计时覆盖 submit、timed-CV 背压、finish、drain 和 worker join，不含输入解码、打开数据库和计时外 SQLite oracle。SQLite 逐字段、逐键集合核验；Null 仅消费并核对完整字节 checksum。每格有独立 warmup、日志、实际参数、计数和 SQLite 连接 PRAGMA。
+十六格为 Redis real/null × Storage sqlite/null × FIFO off/on × pipeline off/on（ADR-028）。输入是独立 Python 生成的完整 64B LE Tick 文件，所有格共享前后 SHA；计时覆盖 submit、timed-CV 背压、finish、drain 和 worker join，不含输入解码、打开数据库和计时外 SQLite oracle。SQLite 逐字段、逐键集合核验；Null 仅消费并核对完整字节 checksum。每格有独立 warmup、日志、实际参数、计数和 SQLite 连接 PRAGMA。
 
+- pipeline=on 是写穿两级流水线：每分片发布线程与存储线程经有界交接队列重叠发布 RTT 与 SQLite 提交；存储线程用第二条 Redis 连接做 finish/release。它不减少任何工作，只重叠等待；上界是两段中较慢的一段。
 - NullRedis 模拟每批认领成功，不提供真实租约仲裁验收；`published_records` 在此只表示适配器成功调用。
 - NullStorage 不执行真实 Redis 的 done 标记，也不增加 committed/inserted；`queue_complete=true` 不等于 `storage_complete=true`。
 - committed input 与 inserted unique 分开；有重复时二者不能混作同一分子。背压 rejected 是重试提交次数，不是输入永久缺失；源必须成功交完全部输入。

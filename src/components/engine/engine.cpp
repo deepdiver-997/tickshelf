@@ -12,18 +12,27 @@
 
 namespace tickshelf {
 
+// 流水线两级之间的交接项（ADR-028）：发布线程认领后交给存储线程。
+struct Engine::Handoff {
+    SlicePtr slice;
+    std::vector<char> claimed;
+};
+
 struct Engine::Shard {
     Shard(std::size_t index_, const EngineConfig& config)
-        : index(index_), ready(config.inflight), dedupe(config.dedup_bytes) {}
+        : index(index_), ready(config.inflight), dedupe(config.dedup_bytes),
+          handoff(config.inflight) {}
 
     const std::size_t index;
     Ingestor staging;                 // 仅源线程
     std::uint64_t staging_records = 0;  // 仅源线程
     std::uint64_t staging_since_ms = 0; // 仅源线程
     SlicePtr sealed_pending;          // 仅源线程：ready 满时暂存
-    BoundedQueue<SlicePtr> ready;     // 源线程 push / worker pop
+    BoundedQueue<SlicePtr> ready;     // 源线程 push / 发布 worker pop
     DedupeCache dedupe;               // 仅源线程
-    std::thread worker;
+    BoundedQueue<Handoff> handoff;    // 发布线程 push / 存储 worker pop（流水线模式）
+    std::thread worker;               // 发布 worker（单级模式兼存储）
+    std::thread storage_worker;       // 存储 worker（流水线模式）
     std::atomic<std::uint64_t> pending_records{0};  // staging+queued+in-flight
     std::uint64_t next_sequence = 0;                // 仅源线程
 
@@ -55,14 +64,17 @@ Engine::Engine(EngineConfig config, std::vector<std::unique_ptr<RedisShard>> red
     if (config_.finish_attempts == 0) config_.finish_attempts = 1;
     if (config_.shutdown_ms == 0) config_.shutdown_ms = 1;
     config_.max_pending_records = std::max(config_.max_pending_records, config_.batch_records);
+    if (config_.pipeline && config_.write_mode != WriteMode::WriteThrough)
+        throw std::invalid_argument("engine: pipeline requires write-through mode");
 
+    const std::size_t redis_per_shard = config_.pipeline ? 2 : 1;
     if (config_.write_mode == WriteMode::StorageOnly) {
-        if (redis_.size() != 0)
+        if (!redis_.empty())
             throw std::invalid_argument("engine: storage-only mode takes no redis shards");
         if (storage_.size() != config_.shards)
             throw std::invalid_argument("engine: storage shard count mismatch");
     } else {
-        if (redis_.size() != config_.shards)
+        if (redis_.size() != config_.shards * redis_per_shard)
             throw std::invalid_argument("engine: redis shard count mismatch");
         if (config_.write_mode == WriteMode::WriteThrough && storage_.size() != config_.shards)
             throw std::invalid_argument("engine: storage shard count mismatch");
@@ -71,8 +83,12 @@ Engine::Engine(EngineConfig config, std::vector<std::unique_ptr<RedisShard>> red
     shards_.reserve(config_.shards);
     for (std::size_t i = 0; i < config_.shards; ++i)
         shards_.push_back(std::make_unique<Shard>(i, config_));
-    for (auto& shard : shards_)
+    for (auto& shard : shards_) {
         shard->worker = std::thread([this, shard = shard.get()] { worker_loop(*shard); });
+        if (config_.pipeline)
+            shard->storage_worker = std::thread(
+                [this, shard = shard.get()] { storage_loop(*shard); });
+    }
 }
 
 Engine::~Engine() { stop(); }
@@ -153,11 +169,18 @@ void Engine::seal(Shard& shard, std::uint64_t now_ms) {
 }
 
 void Engine::observe_queue_peak(Shard& shard) {
-    const auto depth = static_cast<std::uint64_t>(shard.ready.size());
+    const auto depth = static_cast<std::uint64_t>(shard.ready.size() + shard.handoff.size());
     auto peak = shard.queue_peak.load(std::memory_order_relaxed);
     while (depth > peak &&
            !shard.queue_peak.compare_exchange_weak(peak, depth, std::memory_order_relaxed)) {
     }
+}
+
+RedisShard& Engine::publish_port(Shard& shard) { return *redis_[shard.index]; }
+
+RedisShard& Engine::finish_port(Shard& shard) {
+    // 流水线模式：存储线程用独立连接做 finish/release，避免与发布线程共享 RESP 客户端。
+    return *redis_[config_.pipeline ? config_.shards + shard.index : shard.index];
 }
 
 void Engine::complete(Shard& shard, const SlicePtr& slice) {
@@ -174,7 +197,32 @@ void Engine::complete(Shard& shard, const SlicePtr& slice) {
     done_cv_.notify_all();
 }
 
-void Engine::process(Shard& shard, const SlicePtr& slice) {
+bool Engine::publish_slice(Shard& shard, const SlicePtr& slice, std::vector<char>& claimed) {
+    FlushOptions options;
+    options.claim_lease = config_.write_mode == WriteMode::WriteThrough;
+    options.worker_id = config_.worker_id + "-" + std::to_string(shard.index);
+    options.lease_ttl_s = config_.lease_ttl_s;
+
+    claimed.clear();
+    for (;;) {
+        if (stopping_.load(std::memory_order_acquire)) return false;
+        claimed.clear();
+        if (publish_port(shard).publish_and_claim(slice->batches, options, claimed)) break;
+        if (stopping_.load(std::memory_order_relaxed)) return false;  // 未发布：保留 pending 计数
+        ++slice->attempts;
+        shard.retries.fetch_add(1, std::memory_order_relaxed);
+        const auto shift = std::min<std::uint32_t>(slice->attempts, 6);
+        std::uint64_t delay = config_.retry_ms;
+        for (std::uint32_t i = 0; i < shift; ++i)
+            delay = delay >= config_.max_retry_ms / 2
+                        ? config_.max_retry_ms : delay * 2;
+        if (!retry_wait(delay)) return false;
+    }
+    shard.published_records.fetch_add(slice->records, std::memory_order_relaxed);
+    return true;
+}
+
+void Engine::store_slice(Shard& shard, const SlicePtr& slice, std::vector<char> claimed) {
     // StorageOnly（ADR-026）：无 Redis 发布/租约仲裁，全片直接落存储。
     // 面向历史回填/单写者导入；无 claim/skipped/finish_pending 语义。
     if (config_.write_mode == WriteMode::StorageOnly) {
@@ -200,27 +248,6 @@ void Engine::process(Shard& shard, const SlicePtr& slice) {
         return;
     }
 
-    FlushOptions options;
-    options.claim_lease = config_.write_mode == WriteMode::WriteThrough;
-    options.worker_id = config_.worker_id + "-" + std::to_string(shard.index);
-    options.lease_ttl_s = config_.lease_ttl_s;
-
-    std::vector<char> claimed;
-    for (;;) {
-        if (stopping_.load(std::memory_order_acquire)) return;
-        claimed.clear();
-        if (redis_[shard.index]->publish_and_claim(slice->batches, options, claimed)) break;
-        if (stopping_.load(std::memory_order_relaxed)) return;  // 未发布：保留 pending 计数
-        ++slice->attempts;
-        shard.retries.fetch_add(1, std::memory_order_relaxed);
-        const auto shift = std::min<std::uint32_t>(slice->attempts, 6);
-        std::uint64_t delay = config_.retry_ms;
-        for (std::uint32_t i = 0; i < shift; ++i)
-            delay = delay >= config_.max_retry_ms / 2
-                        ? config_.max_retry_ms : delay * 2;
-        if (!retry_wait(delay)) return;
-    }
-    shard.published_records.fetch_add(slice->records, std::memory_order_relaxed);
     slice->claimed = claimed;
 
     if (config_.write_mode == WriteMode::PublishOnly) {
@@ -251,7 +278,7 @@ void Engine::process(Shard& shard, const SlicePtr& slice) {
     const std::int64_t inserted = storage_[shard.index]->upsert_flush(mine);
     if (inserted < 0) {
         // 数据仍在 Redis、state pending；释放自己的租约，让 persister 补偿。
-        if (!stopping_.load(std::memory_order_acquire)) redis_[shard.index]->release(mine_ids);
+        if (!stopping_.load(std::memory_order_acquire)) finish_port(shard).release(mine_ids);
         shard.degraded_records.fetch_add(mine_records, std::memory_order_relaxed);
         complete(shard, slice);
         return;
@@ -260,7 +287,7 @@ void Engine::process(Shard& shard, const SlicePtr& slice) {
     if (!storage_[shard.index]->persists_records()) {
         // A Null/counting sink must never mark real Redis records as stored/done.
         shard.sink_consumed_records.fetch_add(mine_records, std::memory_order_relaxed);
-        if (!stopping_.load(std::memory_order_acquire)) redis_[shard.index]->release(mine_ids);
+        if (!stopping_.load(std::memory_order_acquire)) finish_port(shard).release(mine_ids);
         complete(shard, slice);
         return;
     }
@@ -270,7 +297,7 @@ void Engine::process(Shard& shard, const SlicePtr& slice) {
     bool finished = false;
     for (std::uint64_t attempt = 0; attempt < config_.finish_attempts; ++attempt) {
         if (stopping_.load(std::memory_order_acquire)) break;
-        if (redis_[shard.index]->finish(mine_ids)) {
+        if (finish_port(shard).finish(mine_ids)) {
             finished = true;
             break;
         }
@@ -281,21 +308,61 @@ void Engine::process(Shard& shard, const SlicePtr& slice) {
     complete(shard, slice);
 }
 
-bool Engine::retry_wait(std::uint64_t delay_ms) {
-    std::unique_lock<std::mutex> lock(done_mutex_);
-    return !done_cv_.wait_for(lock, std::chrono::milliseconds(delay_ms),
-                              [&] { return stopping_.load(std::memory_order_acquire); });
+bool Engine::handoff_push(Shard& shard, SlicePtr slice, std::vector<char> claimed) {
+    // 满时阻塞让出；drain 关闭队列后唤醒并返回 false——slice 放弃、pending 计数
+    // 如实保留（租约由 TTL 收尾），与发布失败同语义。
+    return shard.handoff.push_wait(Handoff{std::move(slice), std::move(claimed)});
 }
 
 void Engine::worker_loop(Shard& shard) {
+    if (config_.pipeline) {
+        publish_loop(shard);
+        return;
+    }
     for (;;) {
         SlicePtr slice;
         if (!shard.ready.pop_wait(slice)) return;
         // close() normally drains a queue. Shutdown must not start one potentially
         // blocking adapter call per remaining slice after the drain budget expires.
         if (stopping_.load(std::memory_order_acquire)) return;
-        process(shard, slice);
+        if (config_.write_mode == WriteMode::StorageOnly) {
+            store_slice(shard, slice, {});
+            continue;
+        }
+        std::vector<char> claimed;
+        if (!publish_slice(shard, slice, claimed)) return;
+        store_slice(shard, slice, std::move(claimed));
     }
+}
+
+void Engine::publish_loop(Shard& shard) {
+    for (;;) {
+        SlicePtr slice;
+        if (!shard.ready.pop_wait(slice)) return;
+        // close() normally drains a queue. Shutdown must not start one potentially
+        // blocking adapter call per remaining slice after the drain budget expires.
+        if (stopping_.load(std::memory_order_acquire)) return;
+        std::vector<char> claimed;
+        if (!publish_slice(shard, slice, claimed)) return;
+        if (!handoff_push(shard, std::move(slice), std::move(claimed))) return;
+    }
+}
+
+void Engine::storage_loop(Shard& shard) {
+    for (;;) {
+        Handoff item;
+        if (!shard.handoff.pop_wait(item)) return;
+        // close() normally drains a queue. Shutdown must not start one potentially
+        // blocking adapter call per remaining item after the drain budget expires.
+        if (stopping_.load(std::memory_order_acquire)) return;
+        store_slice(shard, item.slice, std::move(item.claimed));
+    }
+}
+
+bool Engine::retry_wait(std::uint64_t delay_ms) {
+    std::unique_lock<std::mutex> lock(done_mutex_);
+    return !done_cv_.wait_for(lock, std::chrono::milliseconds(delay_ms),
+                              [&] { return stopping_.load(std::memory_order_acquire); });
 }
 
 DrainReport Engine::drain_report() const {
@@ -377,9 +444,14 @@ DrainReport Engine::drain(std::chrono::milliseconds timeout) {
     // Redis 端口可被中断：阻塞中的 publish/finish/release 立即以失败返回，
     // join 不再等满一个连接超时。Storage 的阻塞提交不可中断，等它完成当前调用。
     for (auto& port : redis_) port->interrupt();
-    for (auto& ptr : shards_) ptr->ready.close();
-    for (auto& ptr : shards_)
+    for (auto& ptr : shards_) {
+        ptr->ready.close();
+        ptr->handoff.close();
+    }
+    for (auto& ptr : shards_) {
         if (ptr->worker.joinable()) ptr->worker.join();
+        if (ptr->storage_worker.joinable()) ptr->storage_worker.join();
+    }
     stopped_.store(true, std::memory_order_release);
 
     return drain_report();
@@ -410,7 +482,7 @@ EngineStats Engine::stats() const {
         st.degraded_records = shard.degraded_records.load(std::memory_order_relaxed);
         st.retries = shard.retries.load(std::memory_order_relaxed);
         st.finish_pending_records = shard.finish_pending_records.load(std::memory_order_relaxed);
-        st.queue_depth = static_cast<std::uint64_t>(shard.ready.size());
+        st.queue_depth = static_cast<std::uint64_t>(shard.ready.size() + shard.handoff.size());
         st.queue_peak = shard.queue_peak.load(std::memory_order_relaxed);
         st.pending_records = shard.pending_records.load(std::memory_order_relaxed);
 

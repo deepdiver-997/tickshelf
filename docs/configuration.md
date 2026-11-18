@@ -205,6 +205,7 @@ unchanged: one shard uses `db`, multiple shards use `db.0`, `db.1`, etc.
 | `engine_lease_ttl_s` | `--engine-lease-ttl-s S` | `60` | Write-through lease TTL (1–86400) |
 | `engine_shutdown_ms` | `--engine-shutdown-ms MS` | `10000` | Drain deadline on SIGTERM |
 | `raw_journal` | `--raw-journal` / `--no-raw-journal` | `false` | Per-shard raw journal before storage commit (ADR-027); requires `engine=true` and `persist=storage`, rejected otherwise |
+| `engine_pipeline` | `--engine-pipeline` / `--no-engine-pipeline` | `false` | Two-stage write-through pipeline (ADR-028): per-shard publish thread and storage thread with a bounded handoff queue and a second Redis connection for finish/release; requires `engine=true` and `persist=sqlite`, rejected otherwise |
 
 The example explicitly selects `sqlite`; omitting both file and CLI settings
 still selects the original `none` mode. Storage settings are validated and
@@ -304,7 +305,7 @@ Exact key sets, shown with no-file defaults (evictor supplied with
 **tickshelfd**
 
 ```json
-{"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"bind":"127.0.0.1","port":9900,"flush_interval_ms":500,"persist":"none","engine":false,"raw_journal":false,"engine_batch_records":8192,"engine_batch_bytes":4194304,"engine_batch_ms":100,"engine_inflight":8,"engine_dedup":false,"engine_dedup_bytes":268435456,"engine_retry_ms":50,"engine_max_pending_records":65536,"engine_lease_ttl_s":60,"engine_shutdown_ms":10000}
+{"redis_host":"127.0.0.1","redis_port":6379,"db":"ticks.db","shards":1,"bind":"127.0.0.1","port":9900,"flush_interval_ms":500,"persist":"none","engine":false,"raw_journal":false,"engine_pipeline":false,"engine_batch_records":8192,"engine_batch_bytes":4194304,"engine_batch_ms":100,"engine_inflight":8,"engine_dedup":false,"engine_dedup_bytes":268435456,"engine_retry_ms":50,"engine_max_pending_records":65536,"engine_lease_ttl_s":60,"engine_shutdown_ms":10000}
 ```
 
 **persister**

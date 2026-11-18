@@ -50,7 +50,7 @@ class EngineBenchOracles(unittest.TestCase):
         persistent = storage == "sqlite"
         return {"schema": 1, "status": "PASS", "label": "in-process-real-Engine-no-TTAP-ingress",
                 "parameters": {"redis": "null", "storage": storage, "fifo": fifo,
-                               "records": 25, "shards": 2},
+                               "pipeline": "off", "records": 25, "shards": 2},
                 "timing": {"elapsed_s": .3, "submit_s": .1, "drain_s": .2},
                 "counters": {"submitted_records": 26, "accepted_records": 25, "rejected_records": 1,
                              "sealed_slices": 4, "queue_peak": 2, "retries": 0, "published_records": forwarded,
@@ -83,18 +83,18 @@ class EngineBenchOracles(unittest.TestCase):
             for fifo in ("off", "on"):
                 with self.subTest(storage=storage, fifo=fifo):
                     data = self.metrics(storage, fifo)
-                    self.assertTrue(bench.validate_native(data, self.manifest, "null", storage, fifo)["passed"])
+                    self.assertTrue(bench.validate_native(data, self.manifest, "null", storage, fifo, "off")["passed"])
 
     def test_null_cannot_claim_commit_insert_or_storage_completion(self):
         for field, value in (("committed_input_records", 20), ("inserted_unique_records", 20), ("durable_records", 20)):
             data = self.metrics("null")
             data["counters"][field] = value
             with self.subTest(field=field), self.assertRaises(RunError):
-                bench.validate_native(data, self.manifest, "null", "null", "on")
+                bench.validate_native(data, self.manifest, "null", "null", "on", "off")
         data = self.metrics("null")
         data["storage_complete"] = True
         with self.assertRaises(RunError):
-            bench.validate_native(data, self.manifest, "null", "null", "on")
+            bench.validate_native(data, self.manifest, "null", "null", "on", "off")
 
     def test_native_timing_checksum_and_pragma_gates(self):
         corruptions = [lambda d: d["timing"].update(elapsed_s=.4),
@@ -108,7 +108,7 @@ class EngineBenchOracles(unittest.TestCase):
             data = self.metrics()
             corrupt(data)
             with self.assertRaises(RunError):
-                bench.validate_native(data, self.manifest, "null", "sqlite", "on")
+                bench.validate_native(data, self.manifest, "null", "sqlite", "on", "off")
 
     def test_independent_sqlite_oracle_checks_every_field(self):
         rows = [bench.tick_values(i, 3) for i in range(20)]
@@ -174,7 +174,7 @@ class EngineBenchOracles(unittest.TestCase):
         with patch.object(bench, "wait_child", side_effect=RunError("synthetic timeout")), \
                 patch.object(OwnedProcesses, "start", return_value=None):
             result = bench.run_native(self.directory, self.directory / "failed", Path(self.manifest["path"]),
-                                      self.manifest, redis="null", storage="null", fifo="on", args=args)
+                                      self.manifest, redis="null", storage="null", fifo="on", pipeline="off", args=args)
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("synthetic timeout", result["error"])
         self.assertTrue((self.directory / "failed/result.json").is_file())
@@ -193,10 +193,13 @@ class NativeEngineSmoke(unittest.TestCase):
                                    max_pending_records=8, dedup_bytes=1024, timeout=3)
             for storage in ("sqlite", "null"):
                 for fifo in ("off", "on"):
-                    with self.subTest(storage=storage, fifo=fifo):
-                        result = bench.run_native(BUILD, directory / f"{storage}-{fifo}", directory / "input.ticks",
-                                                  manifest, redis="null", storage=storage, fifo=fifo, args=args)
-                        self.assertEqual(result["status"], "PASS", json.dumps(result, indent=2))
+                    for pipeline in ("off", "on"):
+                        with self.subTest(storage=storage, fifo=fifo, pipeline=pipeline):
+                            result = bench.run_native(
+                                BUILD, directory / f"{storage}-{fifo}-pipe-{pipeline}",
+                                directory / "input.ticks", manifest, redis="null",
+                                storage=storage, fifo=fifo, pipeline=pipeline, args=args)
+                            self.assertEqual(result["status"], "PASS", json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

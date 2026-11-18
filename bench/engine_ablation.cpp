@@ -46,6 +46,7 @@ std::uint64_t number(const std::string& value, std::uint64_t low, std::uint64_t 
 }
 struct Options {
     std::string input, output, redis = "null", storage = "sqlite", fifo = "off";
+    std::string pipeline = "off";
     std::uint64_t port = 0, shards = 2, batch = 256, inflight = 4, pending = 4096;
     std::uint64_t dedup_bytes = 1 << 20, timeout_ms = 30000;
 };
@@ -63,6 +64,7 @@ Options parse(int argc, char** argv) {
         else if (key == "--redis") o.redis = value;
         else if (key == "--storage") o.storage = value;
         else if (key == "--fifo") o.fifo = value;
+        else if (key == "--pipeline") o.pipeline = value;
         else if (key == "--redis-port") o.port = number(value, 1, 65535);
         else if (key == "--shards") o.shards = number(value, 1, 64);
         else if (key == "--batch-records") o.batch = number(value, 1, 65536);
@@ -74,6 +76,7 @@ Options parse(int argc, char** argv) {
     }
     if (o.input.empty() || o.output.empty() || (o.redis != "real" && o.redis != "null") ||
         (o.storage != "sqlite" && o.storage != "null") || (o.fifo != "on" && o.fifo != "off") ||
+        (o.pipeline != "on" && o.pipeline != "off") ||
         (o.redis == "real" && (o.port == 0 || o.port == 6379)) || o.pending < o.batch)
         throw std::runtime_error("invalid options (real Redis requires an explicit private, non-6379 port)");
     return o;
@@ -162,6 +165,7 @@ int main(int argc, char** argv) {
         EngineConfig config;
         config.shards = o.shards;
         config.write_mode = WriteMode::WriteThrough;
+        config.pipeline = o.pipeline == "on";
         config.batch_records = o.batch;
         config.batch_bytes = 0;
         config.batch_ms = 10;
@@ -173,8 +177,11 @@ int main(int argc, char** argv) {
         config.max_retry_ms = 10;
         config.shutdown_ms = o.timeout_ms;
         std::vector<std::unique_ptr<RedisShard>> redis;
-        if (o.redis == "real") redis = make_redis_shards("127.0.0.1", static_cast<std::uint16_t>(o.port), o.shards);
-        else for (std::size_t i = 0; i < o.shards; ++i) redis.push_back(std::make_unique<NullRedis>());
+        const std::size_t redis_shards = o.shards * (config.pipeline ? 2 : 1);
+        if (o.redis == "real")
+            redis = make_redis_shards("127.0.0.1", static_cast<std::uint16_t>(o.port), redis_shards);
+        else
+            for (std::size_t i = 0; i < redis_shards; ++i) redis.push_back(std::make_unique<NullRedis>());
         std::vector<Observation> observations(o.shards);
         std::vector<SqliteConnectionInfo> infos(o.storage == "sqlite" ? o.shards : 0);
         std::vector<std::unique_ptr<StorageShard>> storage;
@@ -213,7 +220,8 @@ int main(int argc, char** argv) {
                   << "\"debug\""
 #endif
                   << ",\"parameters\":{\"redis\":" << quote(o.redis) << ",\"storage\":" << quote(o.storage)
-                  << ",\"fifo\":" << quote(o.fifo) << ",\"records\":" << ticks.size()
+                  << ",\"fifo\":" << quote(o.fifo) << ",\"pipeline\":" << quote(o.pipeline)
+                  << ",\"records\":" << ticks.size()
                   << ",\"shards\":" << o.shards << ",\"batch_records\":" << o.batch
                   << ",\"batch_bytes\":0,\"batch_ms\":10,\"inflight\":" << o.inflight
                   << ",\"max_pending_records\":" << o.pending << ",\"dedup_bytes_per_shard\":" << config.dedup_bytes

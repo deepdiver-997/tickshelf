@@ -115,6 +115,12 @@ public:
                          "(write-through uses the Redis lease as its recovery authority)\n");
             return false;
         }
+        if (opt_.engine_pipeline && !(opt_.engine && opt_.persist == "sqlite")) {
+            std::fprintf(stderr,
+                         "tickshelfd: --engine-pipeline requires --engine on --persist sqlite "
+                         "(pipeline is a write-through topology)\n");
+            return false;
+        }
         if (opt_.engine) {
             if (!start_engine()) return false;
         } else if (opt_.persist == "sqlite") {
@@ -280,6 +286,7 @@ private:
         tickshelf::EngineConfig cfg;
         cfg.shards = static_cast<std::size_t>(std::max(1, opt_.shards));
         cfg.write_mode = tickshelf::write_mode_from_persist(opt_.persist);
+        cfg.pipeline = opt_.engine_pipeline;
         cfg.batch_records = opt_.engine_batch_records;
         cfg.batch_bytes = opt_.engine_batch_bytes;
         cfg.batch_ms = opt_.engine_batch_ms;
@@ -293,8 +300,9 @@ private:
 
         auto redis_shards = cfg.write_mode == tickshelf::WriteMode::StorageOnly
                                 ? std::vector<std::unique_ptr<tickshelf::RedisShard>>{}
-                                : tickshelf::make_redis_shards(opt_.redis_host, opt_.redis_port,
-                                                               cfg.shards);
+                                : tickshelf::make_redis_shards(
+                                      opt_.redis_host, opt_.redis_port,
+                                      cfg.shards * (cfg.pipeline ? 2 : 1));
         std::vector<std::unique_ptr<tickshelf::StorageShard>> storage_shards;
         if (cfg.write_mode != tickshelf::WriteMode::PublishOnly) {
             storage_shards = tickshelf::make_sqlite_storage_shards(opt_.db, cfg.shards);

@@ -174,14 +174,14 @@ def integer(data, key):
     return value
 
 
-def validate_native(data, manifest, redis, storage, fifo):
+def validate_native(data, manifest, redis, storage, fifo, pipeline):
     if data.get("schema") != 1 or data.get("status") != "PASS":
         raise RunError("native process did not report schema=1/PASS")
     if data.get("label") != "in-process-real-Engine-no-TTAP-ingress":
         raise RunError("native ingress label is missing or misleading")
     parameters = data.get("parameters", {})
     expected_parameters = {"redis": redis, "storage": storage, "fifo": fifo,
-                           "records": manifest["records"]}
+                           "pipeline": pipeline, "records": manifest["records"]}
     if any(parameters.get(key) != value for key, value in expected_parameters.items()):
         raise RunError("native parameters disagree with requested cell")
     forwarded = manifest["unique_records"] if fifo == "on" else manifest["records"]
@@ -296,10 +296,11 @@ def verify_flood_sqlite(path, shards, sources, check=lambda: None):
             "rows": total}
 
 
-def run_native(build, directory, input_path, manifest, *, redis, storage, fifo,
+def run_native(build, directory, input_path, manifest, *, redis, storage, fifo, pipeline,
                args, check=lambda: None):
     directory.mkdir()
     result = {"status": "FAIL", "redis": redis, "storage": storage, "fifo": fifo,
+              "pipeline": pipeline,
               "label": "in-process-real-Engine-no-TTAP-ingress", "directory": str(directory)}
     processes = OwnedProcesses(directory / "proc")
     try:
@@ -308,7 +309,7 @@ def run_native(build, directory, input_path, manifest, *, redis, storage, fifo,
         if before != manifest["sha256_before"]:
             raise RunError("controlled input changed before native run")
         command = [build / "engine_ablation", "--input", input_path, "--output", directory / "native",
-                   "--redis", redis, "--storage", storage, "--fifo", fifo,
+                   "--redis", redis, "--storage", storage, "--fifo", fifo, "--pipeline", pipeline,
                    "--shards", args.shards, "--batch-records", args.batch_records,
                    "--inflight", args.inflight, "--max-pending-records", args.max_pending_records,
                    "--dedup-bytes", args.dedup_bytes, "--timeout-ms", int(args.timeout * 1000)]
@@ -326,7 +327,7 @@ def run_native(build, directory, input_path, manifest, *, redis, storage, fifo,
         data = json.loads(lines[0])
         result["native"] = data
         save_json(directory / "native-result.json", data)
-        result["counter_oracle"] = validate_native(data, manifest, redis, storage, fifo)
+        result["counter_oracle"] = validate_native(data, manifest, redis, storage, fifo, pipeline)
         requested_parameters = {"shards": args.shards, "batch_records": args.batch_records,
                                 "inflight": args.inflight, "max_pending_records": args.max_pending_records,
                                 "dedup_bytes_per_shard": args.dedup_bytes if fifo == "on" else 0,
@@ -545,19 +546,22 @@ def main(argv=None):
                     warmup = write_input(warmup_path, args.warmup_records, args.symbols, args.duplicate_every, check)
                     save_json(args.output / "warmup-manifest.json", warmup)
                 for repeat in range(args.repeat):
-                    for redis, storage, fifo in itertools.product(("real", "null"), ("sqlite", "null"), ("off", "on")):
+                    for redis, storage, fifo, pipeline in itertools.product(
+                            ("real", "null"), ("sqlite", "null"), ("off", "on"), ("off", "on")):
                         check()
-                        name = f"r{repeat + 1}-{redis}-{storage}-fifo-{fifo}"
+                        name = f"r{repeat + 1}-{redis}-{storage}-fifo-{fifo}-pipe-{pipeline}"
                         if warmup:
                             case = run_native(args.build, args.output / (name + "-warmup"), warmup_path, warmup,
-                                              redis=redis, storage=storage, fifo=fifo, args=args, check=check)
+                                              redis=redis, storage=storage, fifo=fifo, pipeline=pipeline,
+                                              args=args, check=check)
                             case["phase"] = "independent-warmup"
                             results.append(case)
                             if case["status"] != "PASS":
                                 print(json.dumps(case, allow_nan=False))
                                 continue
                         case = run_native(args.build, args.output / name, input_path, manifest,
-                                          redis=redis, storage=storage, fifo=fifo, args=args, check=check)
+                                          redis=redis, storage=storage, fifo=fifo, pipeline=pipeline,
+                                          args=args, check=check)
                         case.update(phase="measurement", repeat=repeat + 1)
                         results.append(case)
                         print(json.dumps(case, allow_nan=False))

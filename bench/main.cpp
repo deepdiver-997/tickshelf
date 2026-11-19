@@ -49,7 +49,9 @@ void write_fd(int fd, std::string_view value) {
 }
 net::UniqueFd new_file(const std::filesystem::path& path) {
     const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
-    require(fd >= 0, "refuse existing/unwritable output: " + path.string());
+    const int reason = errno;
+    require(fd >= 0, "refuse existing/unwritable output: " + path.string() + ": " +
+                         std::strerror(reason));
     return net::UniqueFd(fd);
 }
 void write_json_file(const std::filesystem::path& path, const std::string& json) {

@@ -1501,6 +1501,564 @@ private:
     }
 };
 
+// ---- Day-run store (TSD1 v2): raw-first per-symbol runs, chunked reservations ----
+//
+// 用户方向（2026-11-20）：最大程度减少数据库操作——数据按 (UTC 日, symbol) 成段
+// 追加，数据库只保存每 run 的区间元数据，元数据惰性落盘。
+//
+// 布局（v2 修正）：当天一个数据文件；每个 (symbol,day) run 由**chunk 列表**组成，
+// chunk 从文件尾顺序分配、定长保留 kDayRunChunkBytes（超大块按需超过）。run 的帧
+// 永不跨 chunk；run 增长出 chunk 时追加新 chunk。为什么必须 chunk 化：相邻连续
+// region + 各自增长必然互相覆盖（v1 实测 CRC mismatch 的根因）；chunk 化后写入
+// 只发生在自己的保留区内，重叠不可能。
+//
+// 帧格式（每条记录）：[u32 len][canonical payload][u32 crc32(payload)]，小端；
+//   逐帧自校验。与 batch-segment 的关键区别：segment 以索引提交为提交点、丢弃
+//   索引外尾部；day-run 的提交点是元数据 flush，恢复会把已 fsync 的有效帧
+//   **采纳**进 run——重试重写同一批产生物理重复帧，由导出端精确去重并单独报告
+//   （与 segment 后端同一 oracle 口径）。
+//
+// 写路径顺序（与 delivery-contract §4.1 同构）：
+//   1. 按 (day, symbol) 分组（保留到达顺序），块 = 逐条帧；
+//   2. 每 run 在自己当前 chunk 内追加（放不下 → 从当日分配指针领新 chunk）；
+//   3. fsync 触碰过的天文件（每天一个文件，每批一次 fsync）；
+//   4. 每 kDayMetadataFlushBatches 批或 finish() 时，一个事务 upsert 脏 run/chunk
+//      与 day_alloc。提交点 = 元数据 flush；崩溃丢失窗口 = 未 flush 的批。
+//   新 run/chunk 的分配不需要专门的持久事务：分配指针 day_alloc 随 flush 持久化，
+//   崩溃后未 flush 的区域无元数据（视为死区，后续分配可复用），与合同一致。
+//
+// 恢复：加载元数据 → 每个 run 从"当前 chunk 的已写字节末尾"逐帧扫描（len 边界 +
+// CRC + 归属 symbol + chunk 容量边界）→ 有效帧采纳（脏，随后持久化）；撕裂帧或
+// chunk 末尾停止（chunk 内残余由下次写覆盖）。文件短于持久 chunk 位置 = 致命。
+constexpr unsigned kDayMetadataFlushBatches = 8;
+constexpr std::uint64_t kDayRunChunkBytes = 65536;
+
+class DayRunStore final : public StoreBase {
+public:
+    DayRunStore(const StoreOptions& options, Metrics& metrics)
+        : StoreBase(options, metrics),
+          directory_(prepare_directory((fs::path(options.directory) / "segment-day-v1").string())),
+          db_(std::make_unique<Database>(directory_ / "day-index.sqlite3", options, 1)) {
+        // 元数据缺失但数据文件存在 = 未提交的数据无归属，拒绝打开。
+        const bool had_metadata = db_->scalar_int(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='symbol_runs'") == 1;
+        if (!had_metadata && any_day_file_present())
+            fail("day-run data files exist without metadata tables");
+        db_->exec("CREATE TABLE IF NOT EXISTS symbol_runs("
+                  "symbol TEXT NOT NULL, day INTEGER NOT NULL,"
+                  "records INTEGER NOT NULL CHECK(records>=0),"
+                  "chunk INTEGER NOT NULL CHECK(chunk>=0),"
+                  "min_time BLOB NOT NULL CHECK(typeof(min_time)='blob' AND length(min_time)=8),"
+                  "max_time BLOB NOT NULL CHECK(typeof(max_time)='blob' AND length(max_time)=8),"
+                  "PRIMARY KEY(symbol,day)) WITHOUT ROWID");
+        db_->exec("CREATE TABLE IF NOT EXISTS run_chunks("
+                  "symbol TEXT NOT NULL, day INTEGER NOT NULL, seq INTEGER NOT NULL CHECK(seq>=0),"
+                  "offset INTEGER NOT NULL CHECK(offset>=0),"
+                  "bytes INTEGER NOT NULL CHECK(bytes>=0),"
+                  "PRIMARY KEY(symbol,day,seq)) WITHOUT ROWID");
+        db_->exec("CREATE TABLE IF NOT EXISTS day_alloc("
+                  "day INTEGER PRIMARY KEY CHECK(day>=0),"
+                  "allocated_end INTEGER NOT NULL CHECK(allocated_end>=0)) WITHOUT ROWID");
+        db_->prepare(flush_run_, "INSERT OR REPLACE INTO symbol_runs"
+                                 "(symbol,day,records,chunk,min_time,max_time) "
+                                 "VALUES(?1,?2,?3,?4,?5,?6)", &metrics_);
+        db_->prepare(flush_chunk_, "INSERT OR REPLACE INTO run_chunks"
+                                   "(symbol,day,seq,offset,bytes) VALUES(?1,?2,?3,?4,?5)", &metrics_);
+        db_->prepare(flush_alloc_, "INSERT OR REPLACE INTO day_alloc(day,allocated_end) VALUES(?1,?2)",
+                     &metrics_);
+        load_runs();
+        sync_directory(directory_);
+        recover();
+    }
+
+    bool write(const std::vector<EncodedRecord>& records, std::string& error) override {
+        error.clear();
+        attempt(records.size());
+        bool transaction = false;
+        try {
+            if (poisoned_) fail("day-run store requires reopen after a failed write");
+            const auto canonical_bytes = validate_batch(records, metrics_);
+            if (records.empty()) return true;
+
+            // 按 (day, symbol) 分组（保留到达顺序）；块 = 逐条 [len][payload][crc]。
+            std::map<RunKey, std::string> blocks;
+            std::map<RunKey, std::uint64_t> block_counts;
+            std::map<RunKey, std::pair<std::uint64_t, std::uint64_t>> block_bounds;
+            {
+                Timer timer(metrics_, "day_run_group");
+                for (const auto& record : records) {
+                    RunKey key{record.time / kDayMs, record.symbol};
+                    auto [bounds_it, inserted] = block_bounds.try_emplace(
+                        key, std::numeric_limits<std::uint64_t>::max(), 0);
+                    bounds_it->second.first = std::min(bounds_it->second.first, record.time);
+                    bounds_it->second.second = std::max(bounds_it->second.second, record.time);
+                    ++block_counts[key];
+                    auto& block = blocks[key];
+                    append_le(block, record.bytes.size(), 4);
+                    block += record.bytes;
+                    append_le(block, crc32(record.bytes), 4);
+                }
+            }
+
+            // 新 run 的首次分配立即持久（run 行 + 空 chunk 行 + day_alloc）：保证
+            // 任何已写/待写数据都有已知归属，恢复扫描才有起点。仅在有新 run 的批
+            // 发生；常规批（无新 symbol/day）零额外事务。
+            bool fresh = false;
+            for (const auto& [key, block] : blocks) {
+                if (runs_.count(key)) continue;
+                Run& run = runs_[key];
+                current_chunk(run, key);
+                run.dirty = true;
+                dirty_.insert(key);
+                fresh = true;
+            }
+            if (fresh) {
+                { Timer timer(metrics_, "index_commit"); metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
+                transaction = true;
+                flush_metadata();
+                { metrics_.inc("sqlite_commit_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("COMMIT"); }
+                transaction = false;
+                batches_since_flush_ = 0;
+                dirty_.clear();
+            }
+
+            poisoned_ = true;
+            duplicates_.reset();
+            std::set<std::uint64_t> touched;
+            {
+                Timer timer(metrics_, "file_append");
+                for (const auto& [key, block] : blocks) {
+                    Run& run = runs_.at(key);
+                    Chunk& chunk = current_chunk(run, key);
+                    if (chunk.bytes + block.size() > chunk.capacity) {
+                        // 块永不跨 chunk：放不下就领新 chunk（分配只在内存，随 flush 持久）。
+                        const std::uint64_t capacity =
+                            std::max<std::uint64_t>(kDayRunChunkBytes, block.size());
+                        run.chunks.push_back(Chunk{allocated_end_[key.first], 0, capacity});
+                        run.current_chunk = static_cast<unsigned>(run.chunks.size() - 1);
+                        allocated_end_[key.first] += capacity;
+                    }
+                    Chunk& target = run.chunks[run.current_chunk];
+                    write_block(day_file(key.first).fd, target.offset + target.bytes, block);
+                    target.bytes += block.size();
+                    run.records += block_counts.at(key);
+                    run.min_time = std::min(run.min_time, block_bounds.at(key).first);
+                    run.max_time = std::max(run.max_time, block_bounds.at(key).second);
+                    run.dirty = true;
+                    dirty_.insert(key);
+                    touched.insert(key.first);
+                }
+            }
+            crash_at("after_append");
+            for (const auto day : touched) sync_file(day_file(day).fd, metrics_);
+            crash_at("after_sync");
+
+            // 元数据惰性 flush：提交点。窗口内的批允许丢失；恢复采纳已 fsync 帧。
+            if (++batches_since_flush_ >= kDayMetadataFlushBatches) {
+                { Timer timer(metrics_, "index_commit"); metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
+                transaction = true;
+                flush_metadata();
+                { metrics_.inc("sqlite_commit_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("COMMIT"); }
+                transaction = false;
+                batches_since_flush_ = 0;
+                dirty_.clear();
+                crash_at("after_metadata");
+            }
+            committed(records.size(), 0, canonical_bytes);
+            poisoned_ = false;
+            return true;
+        } catch (const std::exception& e) {
+            cleanup_statement(flush_run_.ptr, metrics_);
+            cleanup_statement(flush_chunk_.ptr, metrics_);
+            cleanup_statement(flush_alloc_.ptr, metrics_);
+            if (transaction) { metrics_.inc("sqlite_rollback_calls"); metrics_.inc("sqlite_exec_calls"); db_->rollback(); }
+            error = e.what();
+            return false;
+        }
+    }
+
+    bool finish(std::string& error) override {
+        error.clear();
+        try {
+            if (poisoned_) fail("day-run store requires reopen after a failed write");
+            // 全部脏 run/chunk 与分配指针落盘（数据早已逐批 fsync），再对天文件收尾同步。
+            { Timer timer(metrics_, "index_commit"); metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
+            flush_metadata();
+            { metrics_.inc("sqlite_commit_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("COMMIT"); }
+            batches_since_flush_ = 0;
+            dirty_.clear();
+            for (auto& [day, file] : day_files_) sync_file(file.fd, metrics_);
+            db_->checkpoint(metrics_);
+            return true;
+        } catch (const std::exception& e) { poisoned_ = true; error = e.what(); return false; }
+    }
+
+    bool export_rows(std::ostream& out, std::string& error) override {
+        error.clear();
+        try {
+            if (poisoned_) fail("day-run store requires reopen after a failed write");
+            std::set<std::string> seen;
+            std::uint64_t duplicates = 0, rows = 0;
+            for (const auto& [key, run] : runs_) {
+                if (!run.records) continue;
+                visit_run(key, run, [&](const Record& record, std::string_view bytes) {
+                    if (!seen.emplace(bytes).second) ++duplicates;
+                    ++rows;
+                    emit_row(out, record, bytes);
+                });
+            }
+            if (!out) fail("failed to export store rows");
+            duplicates_ = duplicates;
+            metrics_.counters["segment_export_physical_rows"] = rows;
+            metrics_.counters["segment_duplicate_physical_rows"] = duplicates;
+            return true;
+        } catch (const std::exception& e) { error = e.what(); return false; }
+    }
+
+    bool export_range(const std::string& symbol, std::uint64_t from, std::uint64_t to,
+                      std::ostream& out, std::string& error) override {
+        error.clear();
+        try {
+            Timer timer(metrics_, "export_range");
+            if (poisoned_) fail("day-run store requires reopen after a failed write");
+            if (symbol.size() > std::numeric_limits<std::uint16_t>::max())
+                fail("symbol exceeds canonical header bounds");
+            if (from > to) fail("range lower bound exceeds upper bound");
+            if (!out) fail("failed to export store range");
+            std::set<std::string> seen;
+            // 直接定位该 symbol 的连续 run：读的是纯 symbol 数据，无跨 symbol 过滤浪费。
+            for (const auto& [key, run] : runs_) {
+                if (key.second != symbol || !run.records ||
+                    run.min_time > to || run.max_time < from)
+                    continue;
+                metrics_.inc("range_candidate_segments");
+                visit_run(key, run, [&](const Record& record, std::string_view bytes) {
+                    metrics_.inc("range_decoded_rows");
+                    if (record.time >= from && record.time <= to && seen.emplace(bytes).second) {
+                        emit_row(out, record, bytes);
+                        metrics_.inc("range_emitted_rows");
+                    }
+                });
+            }
+            if (!out) fail("failed to export store range");
+            return true;
+        } catch (const std::exception& e) { error = e.what(); return false; }
+    }
+
+    std::string info_json() const override {
+        return "{\"backend\":" + json_quote(options_.backend) +
+            ",\"durable\":true,\"physical_power_loss_tested\":false,\"hardware_plp\":\"unknown\","
+            "\"durability_scope\":" + json_quote(
+                "per-symbol raw frames appended then day-file fsync before deferred SQLite FULL metadata flush; "
+                "commit point is the metadata flush; a crash may lose unflushed batches while valid fsynced frames "
+                "are re-adopted on recovery; no physical PLP claim") +
+            ",\"sync_method\":" + json_quote(
+#if defined(__linux__)
+                "fdatasync"
+#else
+                "fsync"
+#endif
+            ) + ",\"directory_sync\":\"fsync on new directory/file creation\",\"data_layout\":"
+            + json_quote("one file per UTC day (day-<index>.runs); per-symbol runs grown inside sequentially "
+                          "allocated " + std::to_string(kDayRunChunkBytes) + "-byte chunk reservations (frames never "
+                          "straddle chunks; oversized blocks get a dedicated larger chunk); each record framed "
+                          "[u32 len][canonical RCD1][u32 crc32] little-endian") +
+            ",\"database\":" + json_quote((directory_ / "day-index.sqlite3").string()) +
+            ",\"format\":\"TSD1\",\"metadata_flush_batches\":" + std::to_string(kDayMetadataFlushBatches) +
+            ",\"run_chunk_bytes\":" + std::to_string(kDayRunChunkBytes) +
+            ",\"index_granularity\":" + json_quote(
+                "one metadata row per (symbol,day) run plus one row per run chunk (usually one) plus one "
+                "day_alloc row per day, refreshed every " + std::to_string(kDayMetadataFlushBatches) +
+                " batches; no per-record and no per-batch index rows") +
+            ",\"loss_window\":" + json_quote("unflushed batches since the last metadata flush; valid fsynced frames "
+                                              "beyond the durable position are adopted on recovery; a torn frame or chunk "
+                                              "end stops the scan and residual bytes are overwritten by the next write") +
+            ",\"write_pattern\":\"scattered pwrites, one per (symbol,day) block per batch — the honest cost of "
+            "query-ordered layout versus one contiguous append per batch\","
+            "\"deduplication\":\"none at ingress; export retains physical duplicates for logical oracle\","
+            "\"range_export\":\"direct per-symbol run read (chunk list) then time filter; no cross-symbol scanning\","
+            "\"duplicate_count_scope\":\"exact canonical payload comparison during most recent full export_rows; "
+            "invalidated by writes; range export does not set this total\","
+            "\"physical_duplicate_rows\":" + (duplicates_ ? std::to_string(*duplicates_) : "null") +
+            ",\"physical_rows\":" + std::to_string(physical_rows_) +
+            ",\"day_runs\":" + std::to_string(runs_.size()) +
+            ",\"day_files\":" + std::to_string(day_files_.size()) +
+            ",\"recovered_tail_records\":" + std::to_string(recovered_tail_records_) +
+            ",\"recovered_tail_bytes\":" + std::to_string(recovered_tail_bytes_) +
+            ",\"requires_reopen\":" + (poisoned_ ? "true" : "false") +
+            ",\"metric_scope\":\"file_write_calls/bytes are per-symbol-block pwrite syscalls/results; SQLite "
+            "steps/rows/transactions are API counts, not filesystem writes\"}";
+    }
+
+private:
+    static constexpr std::uint64_t kDayMs = 86400000;
+    struct Chunk {
+        std::uint64_t offset = 0;     // chunk 起始（文件内）
+        std::uint64_t bytes = 0;      // 已写帧字节
+        std::uint64_t capacity = 0;   // 保留容量（≥kDayRunChunkBytes，超大块按需）
+    };
+    struct Run {
+        std::vector<Chunk> chunks;    // 到达顺序；末尾是当前写 chunk
+        unsigned current_chunk = 0;
+        std::uint64_t records = 0;
+        std::uint64_t min_time = std::numeric_limits<std::uint64_t>::max(), max_time = 0;
+        bool dirty = false;
+    };
+    using RunKey = std::pair<std::uint64_t, std::string>;
+
+    Chunk& current_chunk(Run& run, const RunKey& key) {
+        if (run.chunks.empty()) {
+            run.chunks.push_back(Chunk{allocated_end_[key.first], 0, kDayRunChunkBytes});
+            run.current_chunk = 0;
+            allocated_end_[key.first] += kDayRunChunkBytes;
+        }
+        return run.chunks[run.current_chunk];
+    }
+
+    File& day_file(std::uint64_t day) {
+        // 先查后开：try_emplace 的参数总是被求值，热路径上会把打开的 fd 丢掉
+        // （每批每 symbol 泄漏一个，大输入直接 EMFILE）。
+        const auto found = day_files_.find(day);
+        if (found != day_files_.end()) return found->second;
+        const auto path = directory_ / ("day-" + std::to_string(day) + ".runs");
+        auto [it, inserted] = day_files_.try_emplace(day, ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600));
+        if (inserted && it->second.fd < 0) {
+            day_files_.erase(it);
+            system_failure("open day-run file " + path.string());
+        }
+        return it->second;
+    }
+
+    void write_block(int fd, std::uint64_t offset, const std::string& block) {
+        std::size_t done = 0;
+        while (done < block.size()) {
+            metrics_.inc("file_write_calls");
+            const auto n = ::pwrite(fd, block.data() + done, block.size() - done,
+                                    static_cast<off_t>(offset + done));
+            if (n < 0) { if (errno == EINTR) continue; system_failure("append day-run block"); }
+            if (n == 0) fail("zero-byte day-run append");
+            done += static_cast<std::size_t>(n);
+            metrics_.inc("file_write_bytes", static_cast<std::uint64_t>(n));
+        }
+    }
+
+    void flush_metadata() {
+        for (const auto& key : dirty_) {
+            const Run& run = runs_.at(key);
+            bind_symbol(*db_, flush_run_.ptr, 1, key.second, &metrics_);
+            bind_int(*db_, flush_run_.ptr, 2, key.first, &metrics_);
+            bind_int(*db_, flush_run_.ptr, 3, run.records, &metrics_);
+            bind_int(*db_, flush_run_.ptr, 4, run.current_chunk, &metrics_);
+            bind_time(*db_, flush_run_.ptr, 5, run.min_time, &metrics_);
+            bind_time(*db_, flush_run_.ptr, 6, run.max_time, &metrics_);
+            step_done(*db_, flush_run_.ptr, metrics_);
+            reset_statement(*db_, flush_run_.ptr, &metrics_);
+            metrics_.inc("index_rows");
+            for (unsigned seq = 0; seq < run.chunks.size(); ++seq) {
+                const Chunk& chunk = run.chunks[seq];
+                bind_symbol(*db_, flush_chunk_.ptr, 1, key.second, &metrics_);
+                bind_int(*db_, flush_chunk_.ptr, 2, key.first, &metrics_);
+                bind_int(*db_, flush_chunk_.ptr, 3, seq, &metrics_);
+                bind_int(*db_, flush_chunk_.ptr, 4, chunk.offset, &metrics_);
+                bind_int(*db_, flush_chunk_.ptr, 5, chunk.bytes, &metrics_);
+                step_done(*db_, flush_chunk_.ptr, metrics_);
+                reset_statement(*db_, flush_chunk_.ptr, &metrics_);
+                metrics_.inc("symbol_index_rows");
+            }
+        }
+        // 分配指针随每次 flush 推进：崩溃后恢复也能还原不重叠的分配视图（含未写满
+        // 的 chunk 保留区——它们的容量已记账，后续分配不会重叠任何活数据）。
+        for (const auto& [day, end] : allocated_end_) {
+            bind_int(*db_, flush_alloc_.ptr, 1, day, &metrics_);
+            bind_int(*db_, flush_alloc_.ptr, 2, end, &metrics_);
+            step_done(*db_, flush_alloc_.ptr, metrics_);
+            reset_statement(*db_, flush_alloc_.ptr, &metrics_);
+        }
+        metrics_.inc("metadata_sql_rows", allocated_end_.size() + dirty_.size());
+    }
+
+    bool any_day_file_present() const {
+        std::error_code error;
+        for (const auto& entry : fs::directory_iterator(directory_, error)) {
+            const auto path = entry.path();
+            if (path.filename().string().rfind("day-", 0) == 0 && path.extension() == ".runs" &&
+                entry.file_size(error) > 0 && !error)
+                return true;
+        }
+        return false;
+    }
+
+    void load_runs() {
+        {
+            Statement stmt;
+            db_->prepare(stmt, "SELECT day,allocated_end FROM day_alloc");
+            int rc;
+            while ((rc = sqlite3_step(stmt.ptr)) == SQLITE_ROW)
+                allocated_end_[static_cast<std::uint64_t>(sqlite3_column_int64(stmt.ptr, 0))] =
+                    static_cast<std::uint64_t>(sqlite3_column_int64(stmt.ptr, 1));
+            if (rc != SQLITE_DONE) db_->db_fail("load day allocation pointers");
+            reset_statement(*db_, stmt.ptr);
+        }
+        {
+            Statement stmt;
+            db_->prepare(stmt, "SELECT symbol,day,seq,offset,bytes FROM run_chunks ORDER BY symbol,day,seq");
+            int rc;
+            while ((rc = sqlite3_step(stmt.ptr)) == SQLITE_ROW) {
+                const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.ptr, 0));
+                if (!text || sqlite3_column_type(stmt.ptr, 0) != SQLITE_TEXT)
+                    fail("invalid day-run chunk symbol");
+                RunKey key{static_cast<std::uint64_t>(sqlite3_column_int64(stmt.ptr, 1)),
+                           std::string(text, static_cast<std::size_t>(sqlite3_column_bytes(stmt.ptr, 0)))};
+                Chunk chunk;
+                chunk.offset = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.ptr, 3));
+                chunk.bytes = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.ptr, 4));
+                chunk.capacity = std::max(kDayRunChunkBytes, chunk.bytes);
+                Run& run = runs_[key];
+                run.chunks.push_back(chunk);
+                run.current_chunk = static_cast<unsigned>(run.chunks.size() - 1);
+            }
+            if (rc != SQLITE_DONE) db_->db_fail("load day-run chunks");
+            reset_statement(*db_, stmt.ptr);
+        }
+        Statement stmt;
+        db_->prepare(stmt, "SELECT symbol,day,records,min_time,max_time FROM symbol_runs");
+        int rc;
+        while ((rc = sqlite3_step(stmt.ptr)) == SQLITE_ROW) {
+            const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.ptr, 0));
+            if (!text || sqlite3_column_type(stmt.ptr, 0) != SQLITE_TEXT)
+                fail("invalid day-run metadata symbol");
+            RunKey key{static_cast<std::uint64_t>(sqlite3_column_int64(stmt.ptr, 1)),
+                       std::string(text, static_cast<std::size_t>(sqlite3_column_bytes(stmt.ptr, 0)))};
+            const auto found = runs_.find(key);
+            if (found == runs_.end()) fail("day-run metadata run has no chunks");
+            found->second.records = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.ptr, 2));
+            found->second.min_time = read_time_key(sqlite3_column_blob(stmt.ptr, 3), sqlite3_column_bytes(stmt.ptr, 3));
+            found->second.max_time = read_time_key(sqlite3_column_blob(stmt.ptr, 4), sqlite3_column_bytes(stmt.ptr, 4));
+            physical_rows_ += found->second.records;
+        }
+        if (rc != SQLITE_DONE) db_->db_fail("load day-run metadata");
+        reset_statement(*db_, stmt.ptr);
+    }
+
+    // 恢复：每个 run 从"当前 chunk 已写字节末尾"扫描到 chunk 容量边界或文件尾，
+    // 逐帧校验（len/CRC/归属 symbol）并采纳；撕裂帧或 chunk 末尾停止。chunk 之外
+    // 未 flush 的新 chunk 区域无元数据（死区，后续分配可复用）。文件短于持久
+    // chunk 位置 = 致命。
+    void recover() {
+        bool adopted_any = false;
+        for (auto& [key, run] : runs_) {
+            if (run.chunks.empty()) fail("day-run metadata run has no chunks");
+            Chunk& chunk = run.chunks[run.current_chunk];
+            // chunk.bytes==0 也可能"分配后已写、未 flush"——恢复扫描必须从
+            // chunk.offset 起步，不能跳过。
+            File& file = day_file(key.first);
+            struct stat status{};
+            if (::fstat(file.fd, &status) < 0) system_failure("stat day-run file");
+            const std::uint64_t scan_end = std::min(chunk.offset + chunk.capacity,
+                                                    static_cast<std::uint64_t>(std::max<off_t>(status.st_size, 0)));
+            if (chunk.bytes && static_cast<std::uint64_t>(status.st_size) < chunk.offset + chunk.bytes)
+                fail("day-run file is shorter than durable metadata: day " + std::to_string(key.first) +
+                     " symbol " + key.second);
+            std::uint64_t scan = chunk.offset + chunk.bytes;
+            const std::uint64_t durable_bytes = chunk.bytes;
+            const std::uint64_t durable_records = run.records;
+            std::string length_bytes(4, '\0'), crc_bytes(4, '\0');
+            for (;;) {
+                if (scan + 8 > scan_end) break;  // chunk 保留边界：帧永不跨 chunk
+                if (!pread_exact(file.fd, length_bytes.data(), 4, scan)) break;
+                const auto length = static_cast<std::size_t>(read_le(length_bytes, 0, 4));
+                if (length == 0 || length > kMaxRecordBytes) break;  // 撕裂/垃圾帧
+                if (scan + 8 + length > scan_end) break;
+                std::string payload(length, '\0');
+                if (!pread_exact(file.fd, payload.data(), length, scan + 4)) break;
+                if (!pread_exact(file.fd, crc_bytes.data(), 4, scan + 4 + length)) break;
+                if (crc32(payload) != static_cast<std::uint32_t>(read_le(crc_bytes, 0, 4))) break;
+                Record record;
+                std::string decode_error;
+                if (!decode_record(payload, record, decode_error) || record.symbol != key.second) break;
+                scan += 4 + length + 4;
+                chunk.bytes = scan - chunk.offset;
+                run.records += 1;
+                run.min_time = std::min(run.min_time, record.time);
+                run.max_time = std::max(run.max_time, record.time);
+            }
+            if (run.records != durable_records) {
+                run.dirty = true;
+                dirty_.insert(key);
+                metrics_.inc("recovered_tail_records", run.records - durable_records);
+                metrics_.inc("recovered_tail_bytes", chunk.bytes - durable_bytes);
+                recovered_tail_records_ += run.records - durable_records;
+                recovered_tail_bytes_ += chunk.bytes - durable_bytes;
+                adopted_any = true;
+            }
+            allocated_end_[key.first] = std::max(allocated_end_[key.first], chunk.offset + chunk.capacity);
+        }
+        if (adopted_any) {
+            { metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
+            flush_metadata();
+            { metrics_.inc("sqlite_commit_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("COMMIT"); }
+            dirty_.clear();
+        }
+    }
+
+    bool pread_exact(int fd, void* out, std::size_t size, std::uint64_t offset) const {
+        std::size_t done = 0;
+        while (done < size) {
+            const auto n = ::pread(fd, static_cast<char*>(out) + done, size - done,
+                                   static_cast<off_t>(offset + done));
+            if (n < 0) { if (errno == EINTR) continue; system_failure("read day-run frame"); }
+            if (n == 0) return false;
+            done += static_cast<std::size_t>(n);
+        }
+        return true;
+    }
+
+    void visit_run(const RunKey& key, const Run& run, const auto& visit) {
+        File& file = day_file(key.first);
+        for (const Chunk& chunk : run.chunks) {
+            if (!chunk.bytes) continue;
+            std::string buffer(static_cast<std::size_t>(chunk.bytes), '\0');
+            if (!pread_exact(file.fd, buffer.data(), buffer.size(), chunk.offset))
+                fail("day-run file truncated inside indexed chunk");
+            std::size_t at = 0;
+            while (at < buffer.size()) {
+                const auto length = static_cast<std::size_t>(read_le(buffer, at, 4));
+                if (length == 0 || length > kMaxRecordBytes || at + 8 + length > buffer.size())
+                    fail("day-run indexed chunk contains a malformed frame");
+                const auto expected_crc = static_cast<std::uint32_t>(read_le(buffer, at + 4 + length, 4));
+                const std::string_view payload(buffer.data() + at + 4, length);
+                if (crc32(payload) != expected_crc) fail("day-run frame CRC mismatch in indexed chunk");
+                Record record;
+                std::string error;
+                if (!decode_record(payload, record, error)) fail("day-run frame decode failed: " + error);
+                visit(record, payload);
+                at += 8 + length;
+            }
+        }
+    }
+
+    void crash_at(std::string_view point) const {
+        if (options_.failpoint == point) {
+            // Only this process is targeted; a failpoint is never a parent or
+            // shared-process kill. SIGKILL deliberately bypasses all destructors.
+            ::raise(SIGKILL);
+            ::_exit(137);
+        }
+    }
+
+    const fs::path directory_;
+    std::unique_ptr<Database> db_;
+    std::map<std::uint64_t, File> day_files_;
+    std::map<std::uint64_t, std::uint64_t> allocated_end_;
+    std::map<RunKey, Run> runs_;
+    std::set<RunKey> dirty_;
+    Statement flush_run_, flush_chunk_, flush_alloc_;
+    bool poisoned_ = false;
+    unsigned batches_since_flush_ = 0;
+    std::uint64_t recovered_tail_records_ = 0, recovered_tail_bytes_ = 0;
+    std::optional<std::uint64_t> duplicates_;
+};
+
 } // namespace
 
 namespace store_detail {
@@ -1543,7 +2101,8 @@ std::unique_ptr<Store> open_store(const StoreOptions& options, Metrics& metrics,
     error.clear();
     try {
         if (options.backend != "sqlite" && options.backend != "sqlite_compact" &&
-            options.backend != "rocksdb" && options.backend != "segment" && options.backend != "segment_rocksdb" && options.backend != "null")
+            options.backend != "rocksdb" && options.backend != "segment" && options.backend != "segment_rocksdb" &&
+            options.backend != "segment_day" && options.backend != "null")
             fail("unknown store backend: " + options.backend);
         if (options.synchronous != "FULL" && options.synchronous != "NORMAL")
             fail("synchronous must be explicitly FULL or NORMAL");
@@ -1561,17 +2120,21 @@ std::unique_ptr<Store> open_store(const StoreOptions& options, Metrics& metrics,
         if (options.sqlite_compact_lookup == "separate" && options.backend != "sqlite_compact")
             fail("sqlite_compact_lookup=separate requires sqlite_compact backend");
         const bool segment = options.backend == "segment" || options.backend == "segment_rocksdb";
+        const bool day_run = options.backend == "segment_day";
         const bool rocks = options.backend == "rocksdb";
         if (!options.failpoint.empty()) {
             if (segment) {
                 if (options.failpoint != "after_append" && options.failpoint != "after_sync" && options.failpoint != "after_index")
                     fail("unknown segment store failpoint");
+            } else if (day_run) {
+                if (options.failpoint != "after_append" && options.failpoint != "after_sync" && options.failpoint != "after_metadata")
+                    fail("unknown day-run store failpoint");
             } else if (rocks) {
                 if (options.failpoint != "before_write" && options.failpoint != "after_write")
                     fail("unknown full-record RocksDB failpoint");
-            } else fail("hard-crash failpoints require a segment or full-record RocksDB backend");
+            } else fail("hard-crash failpoints require a segment, day-run or full-record RocksDB backend");
         }
-        if ((segment || rocks) && options.synchronous != "FULL") fail("segment/RocksDB stores require synchronous=FULL");
+        if ((segment || day_run || rocks) && options.synchronous != "FULL") fail("segment/RocksDB stores require synchronous=FULL");
         if (options.test_rocks_write_status_error && !rocks) fail("RocksDB write status injection requires rocksdb backend");
         if (options.backend != "null" && options.directory.empty()) fail("store directory must not be empty");
 #ifndef TICKSHELF_HAVE_ROCKSDB
@@ -1582,6 +2145,7 @@ std::unique_ptr<Store> open_store(const StoreOptions& options, Metrics& metrics,
         if (options.backend == "null") return std::make_unique<NullStore>(options, metrics);
         if (options.backend == "sqlite" || options.backend == "sqlite_compact")
             return std::make_unique<SqliteStore>(options, metrics);
+        if (options.backend == "segment_day") return std::make_unique<DayRunStore>(options, metrics);
         return std::make_unique<SegmentStore>(options, metrics);
     } catch (const std::exception& e) { error = e.what(); return nullptr; }
     catch (...) { error = "unexpected failure opening benchmark store"; return nullptr; }

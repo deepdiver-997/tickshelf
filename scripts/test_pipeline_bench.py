@@ -338,6 +338,12 @@ class PipelineIntegrationTests(unittest.TestCase):
     def test_segment_reports_physical_duplicates_without_losing_unique_rows(self):
         self.run_pipeline(backend="segment", hash="off", duplicate_every=7, optional_fields=True)
 
+    def test_day_run_reports_physical_duplicates_without_losing_unique_rows(self):
+        self.run_pipeline(backend="segment_day", hash="off", duplicate_every=7, optional_fields=True)
+
+    def test_day_run_full_contract_oracle(self):
+        self.run_pipeline(backend="segment_day", redis="roundtrip", optional_fields=True, duplicate_every=7)
+
     def test_compact_full_private_redis_digest_reuse_oracle(self):
         self.run_pipeline(backend="sqlite_compact", redis="roundtrip", optional_fields=True, duplicate_every=7)
 

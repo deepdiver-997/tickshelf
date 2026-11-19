@@ -46,7 +46,7 @@ bool validate_config(const Config& c, std::string& error) {
         check(one_of(c.hash_mode, {"batch", "record"}), "hash_mode must be batch or record") &&
         check(one_of(c.hash_algorithm, {"sha256", "fnv1a64"}), "hash_algorithm must be sha256 or fnv1a64") &&
         check(one_of(c.redis, {"roundtrip", "publish", "encode", "off"}), "invalid redis mode") &&
-        check(one_of(c.backend, {"sqlite", "sqlite_compact", "segment", "segment_rocksdb", "rocksdb", "null"}), "invalid backend") &&
+        check(one_of(c.backend, {"sqlite", "sqlite_compact", "segment", "segment_rocksdb", "segment_day", "rocksdb", "null"}), "invalid backend") &&
         check(one_of(c.synchronous, {"FULL", "NORMAL"}), "invalid synchronous level") &&
         check(one_of(c.sqlite_fullfsync, {"default", "on", "off"}), "invalid sqlite_fullfsync") &&
         check(one_of(c.store_lookup, {"exact", "assume_unique"}), "store_lookup must be exact or assume_unique") &&
@@ -55,14 +55,15 @@ bool validate_config(const Config& c, std::string& error) {
         check(c.store_lookup == "exact" || c.input_manifest.empty(), "store_lookup=assume_unique does not support capture input_manifest") &&
         check(one_of(c.sqlite_compact_lookup, {"subquery", "separate"}), "invalid sqlite_compact_lookup") &&
         check(c.sqlite_compact_lookup != "separate" || c.backend == "sqlite_compact", "sqlite_compact_lookup=separate requires backend=sqlite_compact") &&
-        check((c.backend != "segment" && c.backend != "segment_rocksdb" && c.backend != "rocksdb") || c.synchronous == "FULL", "segment/rocksdb backends require synchronous=FULL") &&
+        check((c.backend != "segment" && c.backend != "segment_rocksdb" && c.backend != "segment_day" && c.backend != "rocksdb") || c.synchronous == "FULL", "segment/rocksdb backends require synchronous=FULL") &&
 #ifndef TICKSHELF_HAVE_ROCKSDB
         check(c.backend != "segment_rocksdb" && c.backend != "rocksdb", "rocksdb backends require TICKSHELF_BENCH_ROCKSDB=ON") &&
 #endif
         check(one_of(c.transaction_model, {"light", "heavy"}), "invalid transaction_model") &&
-        check(one_of(c.failpoint, {"", "after_append", "after_sync", "after_index", "before_write", "after_write"}), "invalid failpoint") &&
+        check(one_of(c.failpoint, {"", "after_append", "after_sync", "after_index", "after_metadata", "before_write", "after_write"}), "invalid failpoint") &&
         check(c.failpoint.empty() ||
             (one_of(c.failpoint, {"after_append", "after_sync", "after_index"}) && one_of(c.backend, {"segment", "segment_rocksdb"})) ||
+            (one_of(c.failpoint, {"after_append", "after_sync", "after_metadata"}) && c.backend == "segment_day") ||
             (one_of(c.failpoint, {"before_write", "after_write"}) && c.backend == "rocksdb"), "failpoint is not supported by this backend") &&
         check(c.parse != "replay" || c.input == "json", "parse replay requires JSON input") &&
         check(c.input_manifest.empty() || (!c.input_file.empty() && c.input == "json"), "input_manifest requires JSON input_file") &&

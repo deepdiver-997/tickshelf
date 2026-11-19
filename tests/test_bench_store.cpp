@@ -165,7 +165,7 @@ void append_file(const fs::path& path, std::string_view bytes) {
 }
 
 std::vector<std::string> storage_backends(bool include_null = false) {
-    std::vector<std::string> result{"sqlite", "sqlite_compact", "segment"};
+    std::vector<std::string> result{"sqlite", "sqlite_compact", "segment", "segment_day"};
 #ifdef TICKSHELF_HAVE_ROCKSDB
     result.emplace_back("segment_rocksdb");
     result.emplace_back("rocksdb");
@@ -328,7 +328,8 @@ TEST_CASE("bench_store: store transactions may exceed wire-frame byte and row li
         if (backend == "null") {
             CHECK(metrics.counters.at("null_consumed_rows") == batch.size());
         } else {
-            const std::uint64_t expected_rows = is_segment(backend) ? batch.size() : 1;
+            const std::uint64_t expected_rows =
+            (is_segment(backend) || backend == "segment_day") ? batch.size() : 1;
             Json info(store->info_json());
             CHECK(info.value["physical_rows"].get_uint64().value() == expected_rows);
             store.reset();
@@ -863,6 +864,103 @@ TEST_CASE("bench_store: SIGKILL failpoints recover according to committed segmen
         CHECK(hexes(ranged(*store, sample(1).symbol, sample(1).time, sample(1).time)) == expected_hexes({sample(1)}));
     }
     }
+}
+
+TEST_CASE("bench_store: day-run failpoints adopt fsynced frames; metadata flush is the commit point") {
+    // after_append/after_sync：元数据只有分配行，恢复逐帧扫描采纳已 fsync 的帧。
+    for (const std::string failpoint : {"after_append", "after_sync"}) {
+    CAPTURE(failpoint);
+    StoreDirectory directory;
+    auto options = options_for("segment_day", directory.path);
+    Metrics metrics;
+    auto store = opened(options, metrics);
+    std::string error;
+    REQUIRE(store->write({sample(0)}, error));
+    store.reset();
+    const auto data_file = [&] {
+        const auto layout = fs::path(options.directory) / "segment-day-v1";
+        for (const auto& entry : fs::directory_iterator(layout))
+            if (entry.path().extension() == ".runs") return entry.path();
+        FAIL("no day-run file");
+        return layout / "missing";
+    }();
+    const auto confirmed_size = fs::file_size(data_file);
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        options.failpoint = failpoint;
+        Metrics child_metrics;
+        std::string child_error;
+        auto child_store = open_store(options, child_metrics, child_error);
+        if (!child_store) ::_exit(70);
+        child_store->write({sample(1), sample(2)}, child_error);
+        ::_exit(71); // A failpoint must not return or run stack unwinding.
+    }
+    int status = 0;
+    pid_t waited;
+    do { waited = ::waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    REQUIRE(waited == child);
+    REQUIRE(WIFSIGNALED(status));
+    CHECK(WTERMSIG(status) == SIGKILL);
+    CHECK(fs::file_size(data_file) > confirmed_size);  // 帧已落盘（after_sync 场景已 fsync）
+    Metrics recovery_metrics;
+    store = opened(options, recovery_metrics);
+    CHECK(recovery_metrics.counters.at("recovered_tail_records") == 2);
+    CHECK(recovery_metrics.counters.at("recovered_tail_bytes") > 0);
+    const auto rows = exported(*store);
+    CHECK(rows.size() == 3);  // 采纳：fsynced 但未提交的帧活下来了
+    CHECK(hexes(rows) == expected_hexes({sample(0), sample(1), sample(2)}));
+    // 重试重写同一批：采纳过的帧再次写入 → 物理重复，逻辑集合不变。
+    REQUIRE_MESSAGE(store->write({sample(1), sample(2)}, error), error);
+    REQUIRE(store->finish(error));
+    const auto retried = exported(*store);
+    CHECK(retried.size() == 5);
+    std::set<std::string> logical;
+    for (const auto& row : retried) logical.insert(row.hex);
+    CHECK(logical.size() == 3);
+    Json info(store->info_json());
+    CHECK(info.value["physical_duplicate_rows"].get_uint64().value() == 2);
+    CHECK(hexes(ranged(*store, sample(1).symbol, sample(1).time, sample(1).time)) ==
+          expected_hexes({sample(1)}));
+    }
+}
+
+TEST_CASE("bench_store: day-run after_metadata failpoint commits exactly the flushed batches") {
+    StoreDirectory directory;
+    auto options = options_for("segment_day", directory.path);
+    Metrics metrics;
+    auto store = opened(options, metrics);
+    std::string error;
+    REQUIRE(store->write({sample(0)}, error));
+    store.reset();
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        options.failpoint = "after_metadata";
+        Metrics child_metrics;
+        std::string child_error;
+        auto child_store = open_store(options, child_metrics, child_error);
+        if (!child_store) ::_exit(70);
+        for (unsigned batch = 0; batch < 8; ++batch)  // 同 symbol：第 8 批 flush 后崩溃（第 9 批不执行）
+            child_store->write({sample(1)}, child_error);
+        ::_exit(71);
+    }
+    int status = 0;
+    pid_t waited;
+    do { waited = ::waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    REQUIRE(waited == child);
+    REQUIRE(WIFSIGNALED(status));
+    CHECK(WTERMSIG(status) == SIGKILL);
+    Metrics recovery_metrics;
+    store = opened(options, recovery_metrics);
+    // 元数据 flush 已提交（提交点）：8 个崩溃批的帧 + parent 1 条全部持久，无采纳尾部
+    //（无采纳 = 计数键不出现，而不是冒报 0）。
+    CHECK_FALSE(recovery_metrics.counters.count("recovered_tail_records"));
+    CHECK_FALSE(recovery_metrics.counters.count("recovered_tail_bytes"));
+    CHECK(exported(*store).size() == 9);
+    REQUIRE(store->write({sample(10)}, error));
+    REQUIRE(store->finish(error));
+    CHECK(exported(*store).size() == 10);
 }
 
 TEST_CASE("bench_store: compact fixed32 digest collisions compare the full payload in every reuse/model mode") {

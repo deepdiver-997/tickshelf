@@ -426,7 +426,7 @@ def full_chain_contract(config, input_info=None):
                   for key, value in required.items() if config.get(key) != value}
     if config.get("store_lookup", "exact") != "exact":
         violations["store_lookup"] = {"required": "exact", "actual": config.get("store_lookup")}
-    if config.get("backend") not in ("sqlite", "sqlite_compact", "rocksdb", "segment", "segment_rocksdb"):
+    if config.get("backend") not in ("sqlite", "sqlite_compact", "rocksdb", "segment", "segment_rocksdb", "segment_day"):
         violations["backend"] = {"required": "durable record or segment backend", "actual": config.get("backend")}
     coverage = (input_info or {}).get("coverage")
     symbols = coverage.get("observed_symbols", 0) if coverage is not None else config.get("symbols", 0)
@@ -703,7 +703,7 @@ def run_case(binary, case, config, case_dir, input_info, *, stop, args, output, 
             result["oracle"] = (dataset.verify_export(case_dir / "rows.jsonl", config, check=stop.check,
                                                       deadline=time.monotonic() + args.timeout)
                                 if dataset is not None else verify_export(case_dir / "rows.jsonl", config))
-            if config["backend"] in ("segment", "segment_rocksdb"):
+            if config["backend"] in ("segment", "segment_rocksdb", "segment_day"):
                 expected_physical = counter(receiver_metrics, "forwarded")
                 if result["oracle"]["physical_rows"] != expected_physical:
                     raise RunError("segment physical count disagrees with forwarded records")

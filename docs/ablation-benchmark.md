@@ -112,6 +112,28 @@ python3 scripts/engine_bench.py --suite native --build build-bench-release \
 
 同条件事务批量对照使用 `examples/bench/ablation-batch-matrix.json`，命令与 lookup 诊断相同，仅替换 matrix；推荐至少三轮，并在更大输入量复核。调大行数上限仍可能被字节/年龄上限提前切批，必须读取实际事务计数。
 
+## 存储布局对照：行式索引 vs 批段稀疏索引 vs 按天 run
+
+`examples/bench/ablation-storage-matrix.json` 把四种最终存储放到同一输入、同一 FULL 同步、同一 oracle 下对照：
+
+| 后端 | 数据布局 | 索引写入（每批） | 查询路径 |
+|---|---|---|---|
+| `sqlite_compact` | 无数据文件，canonical 入库 | 每记录 1 行候选查找 | SQL 索引 |
+| `rocksdb` | canonical 作 value | 每记录 1 次 Seek | Seek 迭代器 |
+| `segment` | 到达顺序批帧（TSG1） | 1 行段 + 每 symbol 1 行范围 | 候选段整读＋过滤 |
+| `segment_day` | 按 (UTC 日, symbol) 连续 run（TSD1，chunk 化保留区） | 每 run/chunk 1 行，每 8 批才 flush 一次 | 直接定位该 symbol 的 run 顺序读＋过滤 |
+
+`segment_day` 是"本体先行＋稀疏元数据"的参考实现：提交点是元数据 flush（默认每 8 批），崩溃丢失窗口 = 未 flush 的批；恢复逐帧校验（len/CRC/归属 symbol）**采纳**已 fsync 的有效帧，撕裂帧处停止、由下次写覆盖。它对单 symbol 范围查询只读该 symbol 自己的字节（无跨 symbol 过滤浪费），代价是每批对每个出现的 symbol 各一次 pwrite——写模式从"一次顺序追加"变成"按 symbol 散布"，盘越慢这个代价越真实。同口径对照命令：
+
+```sh
+python3 scripts/pipeline_bench.py --build build-record-release \
+  --suite diagnostic --config examples/bench/ablation-full-record.json \
+  --matrix examples/bench/ablation-storage-matrix.json \
+  --records 300000 --repeat 3 --profile off --timeout 240 \
+  --max-disk-mib 8192 --reserve-free-mib 10240 \
+  --output /tmp/my-new-storage-comparison
+```
+
 ## 隔离、资源与复跑
 
 - 结果目录必须新建；原始结果、失败现场不覆盖。只启动 owned 子进程、私有 Redis；不使用清共享 DB15/FLUSHALL 的旧入口。

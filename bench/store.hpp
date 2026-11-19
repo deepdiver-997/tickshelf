@@ -10,7 +10,7 @@
 
 namespace tickshelf::bench {
 struct StoreOptions {
-    std::string backend = "sqlite";  // sqlite | sqlite_compact | rocksdb | segment | segment_rocksdb | null
+    std::string backend = "sqlite";  // sqlite | sqlite_compact | rocksdb | segment | segment_rocksdb | segment_day | null
     std::string directory;
     std::string synchronous = "FULL";
     std::string transaction_model = "light";  // light | heavy

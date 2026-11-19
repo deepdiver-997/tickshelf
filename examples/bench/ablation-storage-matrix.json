@@ -1,0 +1,8 @@
+{
+  "cases": [
+    {"name": "compact_rows8192", "set": {"backend": "sqlite_compact", "sqlite_compact_lookup": "separate"}},
+    {"name": "rocks_rows8192", "set": {"backend": "rocksdb", "sqlite_compact_lookup": "subquery"}},
+    {"name": "segment_batch", "set": {"backend": "segment", "sqlite_compact_lookup": "subquery"}},
+    {"name": "segment_day_runs", "set": {"backend": "segment_day", "sqlite_compact_lookup": "subquery"}}
+  ]
+}

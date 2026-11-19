@@ -1501,37 +1501,39 @@ private:
     }
 };
 
-// ---- Day-run store (TSD1 v2): raw-first per-symbol runs, chunked reservations ----
+// ---- Day-run store (TSD1 v3): buffered per-symbol runs, ordered spill writes ----
 //
-// 用户方向（2026-11-20）：最大程度减少数据库操作——数据按 (UTC 日, symbol) 成段
-// 追加，数据库只保存每 run 的区间元数据，元数据惰性落盘。
+// 用户设计（2026-11-20 定稿）：进程内持有全部 symbol 的当前可写块状态（从元数据
+// 读出；单写者独占数据库，无冲突）。write() 只做内存分流，不立即碰盘：
 //
-// 布局（v2 修正）：当天一个数据文件；每个 (symbol,day) run 由**chunk 列表**组成，
-// chunk 从文件尾顺序分配、定长保留 kDayRunChunkBytes（超大块按需超过）。run 的帧
-// 永不跨 chunk；run 增长出 chunk 时追加新 chunk。为什么必须 chunk 化：相邻连续
-// region + 各自增长必然互相覆盖（v1 实测 CRC mismatch 的根因）；chunk 化后写入
-// 只发生在自己的保留区内，重叠不可能。
+//   1. 按 (UTC 日, symbol) 分流；每条记录编码为 [u32 len][payload][u32 crc32] 帧；
+//   2. 帧能放进该 symbol 当前 chunk 剩余空间（chunk.bytes + fit_bytes + 帧长 ≤
+//      capacity）→ 进**增量缓冲** fit（内存，攒批）；否则进**溢出缓冲** spill，
+//      本批后续帧都算溢出，并标记本次 write 需要 flush；
+//   3. write 末尾：任一 spill，或缓冲总量 ≥ kDayIncrementFlushBytes → 刷盘；
+//      否则数据留在内存。write 返回 true ≠ 已落盘（提交点见下）。
 //
-// 帧格式（每条记录）：[u32 len][canonical payload][u32 crc32(payload)]，小端；
-//   逐帧自校验。与 batch-segment 的关键区别：segment 以索引提交为提交点、丢弃
-//   索引外尾部；day-run 的提交点是元数据 flush，恢复会把已 fsync 的有效帧
-//   **采纳**进 run——重试重写同一批产生物理重复帧，由导出端精确去重并单独报告
-//   （与 segment 后端同一 oracle 口径）。
+// 刷盘（flush_pending，幂等）：
+//   a. 溢出帧按**帧边界**贪心装新 chunk（capacity = max(kDayRunChunkBytes, 首帧
+//      长度)，帧永不跨 chunk），新 chunk 从当日分配指针**连续**分配——一次内存
+//      计算清全部需求（"剩 8M 来 21M → 按需申请 N 块"）；
+//   b. **第一个 SQLite 事务**：写入全部新 chunk 行（bytes=0，分配态）+ 脏 run +
+//      day_alloc——先记录、后写文件；恢复时每个新块都有归属、扫描有起点；
+//   c. 文件写：新 chunk 在文件尾连成一片 → 溢出数据按偏移拼接为**一次顺序大写**
+//      （POSIX 无带偏移的 scatter-gather，这是该布局能拿到的全部顺序性）；fit
+//      增量每 symbol 一次 pwrite（散布，但被缓冲摊销）；
+//   d. fsync 触碰的天文件；
+//   e. **第二个事务**：chunk.bytes=filled、run 计数/时间范围、day_alloc——真正的
+//      提交点。崩溃语义：b 后 c 前崩溃 → 新 chunk 无数据、恢复扫描采纳 0 帧；
+//      c 后 e 前崩溃 → 已写帧被恢复采纳（fsync 先于提交）；e 后全部持久。内存
+//      缓冲内的数据任何崩溃都丢失（交付合同 §4 的允许窗口）。
 //
-// 写路径顺序（与 delivery-contract §4.1 同构）：
-//   1. 按 (day, symbol) 分组（保留到达顺序），块 = 逐条帧；
-//   2. 每 run 在自己当前 chunk 内追加（放不下 → 从当日分配指针领新 chunk）；
-//   3. fsync 触碰过的天文件（每天一个文件，每批一次 fsync）；
-//   4. 每 kDayMetadataFlushBatches 批或 finish() 时，一个事务 upsert 脏 run/chunk
-//      与 day_alloc。提交点 = 元数据 flush；崩溃丢失窗口 = 未 flush 的批。
-//   新 run/chunk 的分配不需要专门的持久事务：分配指针 day_alloc 随 flush 持久化，
-//   崩溃后未 flush 的区域无元数据（视为死区，后续分配可复用），与合同一致。
-//
-// 恢复：加载元数据 → 每个 run 从"当前 chunk 的已写字节末尾"逐帧扫描（len 边界 +
-// CRC + 归属 symbol + chunk 容量边界）→ 有效帧采纳（脏，随后持久化）；撕裂帧或
-// chunk 末尾停止（chunk 内残余由下次写覆盖）。文件短于持久 chunk 位置 = 致命。
-constexpr unsigned kDayMetadataFlushBatches = 8;
+// finish/export/range 前强制 flush_pending：读路径所见即已落盘；Engine 的 finish
+//（done 标记）保证发生在提交点之后。恢复语义与 v2 相同：从每个 run 当前 chunk 的
+// 持久已写位置逐帧校验（len/CRC/归属 symbol/chunk 边界）并采纳，撕裂帧停止、残余
+// 由下次写覆盖；文件短于持久已写位置 = 致命。
 constexpr std::uint64_t kDayRunChunkBytes = 65536;
+constexpr std::uint64_t kDayIncrementFlushBytes = 8ull << 20;
 
 class DayRunStore final : public StoreBase {
 public:
@@ -1574,105 +1576,53 @@ public:
     bool write(const std::vector<EncodedRecord>& records, std::string& error) override {
         error.clear();
         attempt(records.size());
-        bool transaction = false;
+        // 拒绝（超长/越界/坏帧）不毒化：与其余后端同一语义；毒化只针对已分流
+        // 或已触碰分配状态之后的失败。
+        std::uint64_t canonical_bytes = 0;
         try {
-            if (poisoned_) fail("day-run store requires reopen after a failed write");
-            const auto canonical_bytes = validate_batch(records, metrics_);
-            if (records.empty()) return true;
-
-            // 按 (day, symbol) 分组（保留到达顺序）；块 = 逐条 [len][payload][crc]。
-            std::map<RunKey, std::string> blocks;
-            std::map<RunKey, std::uint64_t> block_counts;
-            std::map<RunKey, std::pair<std::uint64_t, std::uint64_t>> block_bounds;
+            canonical_bytes = validate_batch(records, metrics_);
+        } catch (const std::exception& e) {
+            error = e.what();
+            return false;
+        }
+        if (records.empty()) return true;
+        if (poisoned_) {
+            error = "day-run store requires reopen after a failed write";
+            return false;
+        }
+        try {
+            // 内存分流：每帧编码后按 (day, symbol) 进增量或溢出缓冲；不碰盘。
+            bool spill = false;
             {
                 Timer timer(metrics_, "day_run_group");
                 for (const auto& record : records) {
                     RunKey key{record.time / kDayMs, record.symbol};
-                    auto [bounds_it, inserted] = block_bounds.try_emplace(
-                        key, std::numeric_limits<std::uint64_t>::max(), 0);
-                    bounds_it->second.first = std::min(bounds_it->second.first, record.time);
-                    bounds_it->second.second = std::max(bounds_it->second.second, record.time);
-                    ++block_counts[key];
-                    auto& block = blocks[key];
-                    append_le(block, record.bytes.size(), 4);
-                    block += record.bytes;
-                    append_le(block, crc32(record.bytes), 4);
-                }
-            }
-
-            // 新 run 的首次分配立即持久（run 行 + 空 chunk 行 + day_alloc）：保证
-            // 任何已写/待写数据都有已知归属，恢复扫描才有起点。仅在有新 run 的批
-            // 发生；常规批（无新 symbol/day）零额外事务。
-            bool fresh = false;
-            for (const auto& [key, block] : blocks) {
-                if (runs_.count(key)) continue;
-                Run& run = runs_[key];
-                current_chunk(run, key);
-                run.dirty = true;
-                dirty_.insert(key);
-                fresh = true;
-            }
-            if (fresh) {
-                { Timer timer(metrics_, "index_commit"); metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
-                transaction = true;
-                flush_metadata();
-                { metrics_.inc("sqlite_commit_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("COMMIT"); }
-                transaction = false;
-                batches_since_flush_ = 0;
-                dirty_.clear();
-            }
-
-            poisoned_ = true;
-            duplicates_.reset();
-            std::set<std::uint64_t> touched;
-            {
-                Timer timer(metrics_, "file_append");
-                for (const auto& [key, block] : blocks) {
-                    Run& run = runs_.at(key);
-                    Chunk& chunk = current_chunk(run, key);
-                    if (chunk.bytes + block.size() > chunk.capacity) {
-                        // 块永不跨 chunk：放不下就领新 chunk（分配只在内存，随 flush 持久）。
-                        const std::uint64_t capacity =
-                            std::max<std::uint64_t>(kDayRunChunkBytes, block.size());
-                        run.chunks.push_back(Chunk{allocated_end_[key.first], 0, capacity});
-                        run.current_chunk = static_cast<unsigned>(run.chunks.size() - 1);
-                        allocated_end_[key.first] += capacity;
+                    Pending& pending = pending_[key];
+                    std::string frame;
+                    append_le(frame, record.bytes.size(), 4);
+                    frame += record.bytes;
+                    append_le(frame, crc32(record.bytes), 4);
+                    const Chunk& chunk = current_chunk(runs_[key], key);
+                    if (chunk.bytes + pending.fit_bytes + frame.size() <= chunk.capacity) {
+                        pending.fit += frame;
+                        pending.fit_bytes += frame.size();
+                    } else {
+                        pending.spill += frame;
+                        pending.spill_bytes += frame.size();
+                        spill = true;
                     }
-                    Chunk& target = run.chunks[run.current_chunk];
-                    write_block(day_file(key.first).fd, target.offset + target.bytes, block);
-                    target.bytes += block.size();
-                    run.records += block_counts.at(key);
-                    run.min_time = std::min(run.min_time, block_bounds.at(key).first);
-                    run.max_time = std::max(run.max_time, block_bounds.at(key).second);
-                    run.dirty = true;
-                    dirty_.insert(key);
-                    touched.insert(key.first);
+                    pending.records += 1;
+                    pending.min_time = std::min(pending.min_time, record.time);
+                    pending.max_time = std::max(pending.max_time, record.time);
+                    pending_bytes_ += frame.size();
                 }
             }
-            crash_at("after_append");
-            for (const auto day : touched) sync_file(day_file(day).fd, metrics_);
-            crash_at("after_sync");
-
-            // 元数据惰性 flush：提交点。窗口内的批允许丢失；恢复采纳已 fsync 帧。
-            if (++batches_since_flush_ >= kDayMetadataFlushBatches) {
-                { Timer timer(metrics_, "index_commit"); metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
-                transaction = true;
-                flush_metadata();
-                { metrics_.inc("sqlite_commit_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("COMMIT"); }
-                transaction = false;
-                batches_since_flush_ = 0;
-                dirty_.clear();
-                crash_at("after_metadata");
-            }
+            if (spill || pending_bytes_ >= kDayIncrementFlushBytes) flush_pending();
             committed(records.size(), 0, canonical_bytes);
-            poisoned_ = false;
             return true;
         } catch (const std::exception& e) {
-            cleanup_statement(flush_run_.ptr, metrics_);
-            cleanup_statement(flush_chunk_.ptr, metrics_);
-            cleanup_statement(flush_alloc_.ptr, metrics_);
-            if (transaction) { metrics_.inc("sqlite_rollback_calls"); metrics_.inc("sqlite_exec_calls"); db_->rollback(); }
             error = e.what();
+            poisoned_ = true;
             return false;
         }
     }
@@ -1681,12 +1631,7 @@ public:
         error.clear();
         try {
             if (poisoned_) fail("day-run store requires reopen after a failed write");
-            // 全部脏 run/chunk 与分配指针落盘（数据早已逐批 fsync），再对天文件收尾同步。
-            { Timer timer(metrics_, "index_commit"); metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
-            flush_metadata();
-            { metrics_.inc("sqlite_commit_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("COMMIT"); }
-            batches_since_flush_ = 0;
-            dirty_.clear();
+            flush_pending();
             for (auto& [day, file] : day_files_) sync_file(file.fd, metrics_);
             db_->checkpoint(metrics_);
             return true;
@@ -1697,6 +1642,7 @@ public:
         error.clear();
         try {
             if (poisoned_) fail("day-run store requires reopen after a failed write");
+            flush_pending();  // 读路径所见即已落盘
             std::set<std::string> seen;
             std::uint64_t duplicates = 0, rows = 0;
             for (const auto& [key, run] : runs_) {
@@ -1725,6 +1671,7 @@ public:
                 fail("symbol exceeds canonical header bounds");
             if (from > to) fail("range lower bound exceeds upper bound");
             if (!out) fail("failed to export store range");
+            flush_pending();
             std::set<std::string> seen;
             // 直接定位该 symbol 的连续 run：读的是纯 symbol 数据，无跨 symbol 过滤浪费。
             for (const auto& [key, run] : runs_) {
@@ -1749,9 +1696,11 @@ public:
         return "{\"backend\":" + json_quote(options_.backend) +
             ",\"durable\":true,\"physical_power_loss_tested\":false,\"hardware_plp\":\"unknown\","
             "\"durability_scope\":" + json_quote(
-                "per-symbol raw frames appended then day-file fsync before deferred SQLite FULL metadata flush; "
-                "commit point is the metadata flush; a crash may lose unflushed batches while valid fsynced frames "
-                "are re-adopted on recovery; no physical PLP claim") +
+                "per-symbol runs buffered in memory, flushed as one ordered spill write (new chunks allocated "
+                "contiguously; a SQLite allocation transaction commits before file writes) plus scattered fit "
+                "writes, then day-file fsync and a metadata commit transaction; the commit point is that metadata "
+                "commit; a crash may lose buffered/unflushed batches while valid fsynced frames are re-adopted on "
+                "recovery; no physical PLP claim") +
             ",\"sync_method\":" + json_quote(
 #if defined(__linux__)
                 "fdatasync"
@@ -1760,21 +1709,22 @@ public:
 #endif
             ) + ",\"directory_sync\":\"fsync on new directory/file creation\",\"data_layout\":"
             + json_quote("one file per UTC day (day-<index>.runs); per-symbol runs grown inside sequentially "
-                          "allocated " + std::to_string(kDayRunChunkBytes) + "-byte chunk reservations (frames never "
-                          "straddle chunks; oversized blocks get a dedicated larger chunk); each record framed "
-                          "[u32 len][canonical RCD1][u32 crc32] little-endian") +
+                          "allocated chunk reservations (>= " + std::to_string(kDayRunChunkBytes) +
+                          " bytes; frames never straddle chunks; oversized frames get a dedicated larger chunk); "
+                          "each record framed [u32 len][canonical RCD1][u32 crc32] little-endian") +
             ",\"database\":" + json_quote((directory_ / "day-index.sqlite3").string()) +
-            ",\"format\":\"TSD1\",\"metadata_flush_batches\":" + std::to_string(kDayMetadataFlushBatches) +
-            ",\"run_chunk_bytes\":" + std::to_string(kDayRunChunkBytes) +
+            ",\"format\":\"TSD1\",\"run_chunk_bytes\":" + std::to_string(kDayRunChunkBytes) +
+            ",\"increment_flush_bytes\":" + std::to_string(kDayIncrementFlushBytes) +
+            ",\"pending_buffer_bytes\":" + std::to_string(pending_bytes_) +
             ",\"index_granularity\":" + json_quote(
                 "one metadata row per (symbol,day) run plus one row per run chunk (usually one) plus one "
-                "day_alloc row per day, refreshed every " + std::to_string(kDayMetadataFlushBatches) +
-                " batches; no per-record and no per-batch index rows") +
-            ",\"loss_window\":" + json_quote("unflushed batches since the last metadata flush; valid fsynced frames "
-                                              "beyond the durable position are adopted on recovery; a torn frame or chunk "
-                                              "end stops the scan and residual bytes are overwritten by the next write") +
-            ",\"write_pattern\":\"scattered pwrites, one per (symbol,day) block per batch — the honest cost of "
-            "query-ordered layout versus one contiguous append per batch\","
+                "day_alloc row per day, refreshed per flush; no per-record and no per-batch index rows") +
+            ",\"loss_window\":" + json_quote("records still in the in-memory buffer plus unflushed batches since "
+                                              "the last metadata commit; valid fsynced frames beyond the durable "
+                                              "position are adopted on recovery; a torn frame or chunk end stops the "
+                                              "scan and residual bytes are overwritten by the next write") +
+            ",\"write_pattern\":\"one ordered spill write per flush (contiguous new chunks) plus one scattered "
+            "pwrite per (symbol,day) fit increment per flush — frequency amortized by the increment buffer\","
             "\"deduplication\":\"none at ingress; export retains physical duplicates for logical oracle\","
             "\"range_export\":\"direct per-symbol run read (chunk list) then time filter; no cross-symbol scanning\","
             "\"duplicate_count_scope\":\"exact canonical payload comparison during most recent full export_rows; "
@@ -1786,16 +1736,16 @@ public:
             ",\"recovered_tail_records\":" + std::to_string(recovered_tail_records_) +
             ",\"recovered_tail_bytes\":" + std::to_string(recovered_tail_bytes_) +
             ",\"requires_reopen\":" + (poisoned_ ? "true" : "false") +
-            ",\"metric_scope\":\"file_write_calls/bytes are per-symbol-block pwrite syscalls/results; SQLite "
-            "steps/rows/transactions are API counts, not filesystem writes\"}";
+            ",\"metric_scope\":\"file_write_calls/bytes are pwrite syscalls/results; SQLite steps/rows/transactions "
+            "are API counts, not filesystem writes\"}";
     }
 
 private:
     static constexpr std::uint64_t kDayMs = 86400000;
     struct Chunk {
         std::uint64_t offset = 0;     // chunk 起始（文件内）
-        std::uint64_t bytes = 0;      // 已写帧字节
-        std::uint64_t capacity = 0;   // 保留容量（≥kDayRunChunkBytes，超大块按需）
+        std::uint64_t bytes = 0;      // 已提交/已写帧字节（分配态=0）
+        std::uint64_t capacity = 0;   // 保留容量（≥kDayRunChunkBytes，按需更大）
     };
     struct Run {
         std::vector<Chunk> chunks;    // 到达顺序；末尾是当前写 chunk
@@ -1803,6 +1753,14 @@ private:
         std::uint64_t records = 0;
         std::uint64_t min_time = std::numeric_limits<std::uint64_t>::max(), max_time = 0;
         bool dirty = false;
+    };
+    // 内存分流缓冲（write 之间存活）：fit 将写入当前 chunk 剩余空间，spill 等待
+    // 新 chunk（帧序列，含各自 [len][payload][crc]）。
+    struct Pending {
+        std::string fit, spill;
+        std::uint64_t fit_bytes = 0, spill_bytes = 0;
+        std::uint64_t records = 0;
+        std::uint64_t min_time = std::numeric_limits<std::uint64_t>::max(), max_time = 0;
     };
     using RunKey = std::pair<std::uint64_t, std::string>;
 
@@ -1877,6 +1835,119 @@ private:
         metrics_.inc("metadata_sql_rows", allocated_end_.size() + dirty_.size());
     }
 
+    // 刷盘（幂等）：溢出帧按帧边界贪心装新 chunk（连续分配）→ 一个事务持久分配
+    // （chunk 行 bytes=0，先记录）→ 溢出按 offset 拼接为一次顺序大写 + fit 增量
+    // 每 symbol 一次 pwrite → fsync → 内存推进 → 第二个事务提交（提交点）。
+    // flush_pending 内的异常向上传播给调用方（write/finish/export 各自的 catch
+    // 统一清理语句并置 poisoned_）。
+    void flush_pending() {
+        if (pending_.empty()) return;
+        struct SpillPart {
+            RunKey key;
+            unsigned seq = 0;        // 新 chunk 在 run.chunks 中的序号
+            std::uint64_t day = 0;
+            std::uint64_t offset = 0;
+            std::uint64_t filled = 0;
+            std::string data;
+        };
+        std::vector<SpillPart> spill_parts;
+        std::map<RunKey, unsigned> fit_targets;  // fit 增量的目标 chunk 序号（切割前的 current）
+        std::set<std::uint64_t> touched;
+        // a) 按帧边界贪心切割溢出流并连续分配新 chunk（纯内存计算，一次算清）。
+        //    fit 的目标 chunk 先锁定（push 新 chunk 会重排 vector，必须用序号）。
+            for (auto& [key, pending] : pending_) {
+                Run& run = runs_.at(key);
+                fit_targets[key] = run.current_chunk;
+                std::size_t at = 0;
+                while (at < pending.spill.size()) {
+                    const auto first_length = static_cast<std::size_t>(read_le(pending.spill, at, 4));
+                    if (first_length == 0 || first_length > kMaxRecordBytes) fail("invalid buffered spill frame");
+                    const std::uint64_t capacity =
+                        std::max<std::uint64_t>(kDayRunChunkBytes, 4 + first_length + 4);
+                    run.chunks.push_back(Chunk{allocated_end_[key.first], 0, capacity});
+                    run.current_chunk = static_cast<unsigned>(run.chunks.size() - 1);
+                    allocated_end_[key.first] += capacity;
+                    Chunk& chunk = run.chunks.back();
+                    std::uint64_t filled = 0;
+                    std::size_t block_at = at;
+                    while (at < pending.spill.size()) {
+                        const auto length = static_cast<std::size_t>(read_le(pending.spill, at, 4));
+                        if (length == 0 || length > kMaxRecordBytes) fail("invalid buffered spill frame");
+                        const std::uint64_t frame_bytes = 4 + length + 4;
+                        if (filled + frame_bytes > capacity) break;
+                        filled += frame_bytes;
+                        at += frame_bytes;
+                    }
+                    // bytes 保持 0（分配态）：第一个事务只登记归属，filled 在文件
+                    // 写成功后才进内存态，由第二个事务提交——"先记录、后写、再提交"。
+                    spill_parts.push_back(SpillPart{key, static_cast<unsigned>(run.chunks.size() - 1),
+                                                    key.first, chunk.offset, filled,
+                                                    pending.spill.substr(block_at, filled)});
+                }
+                touched.insert(key.first);
+                run.dirty = true;
+                dirty_.insert(key);
+            }
+
+            // b) 第一个事务：持久全部分配（新 chunk 行 bytes=0 + day_alloc + 脏 run）。
+            { Timer timer(metrics_, "index_commit"); metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
+            flush_metadata();
+            { metrics_.inc("sqlite_commit_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("COMMIT"); }
+            // c) 文件写：溢出按 offset 排序拼接为一次顺序大写；fit 每 symbol 一次。
+            poisoned_ = true;
+            duplicates_.reset();
+            std::sort(spill_parts.begin(), spill_parts.end(),
+                      [](const SpillPart& a, const SpillPart& b) { return a.offset < b.offset; });
+            {
+                Timer timer(metrics_, "file_append");
+                // 新 chunk 按分配序（=文件尾连续区间）逐块写入：同一 flush 内相邻
+                // chunk 的写是前进方向的顺序序列（中间可能夹未写满的保留区洞，
+                // 属于该 chunk 自己的保留空间）；跨天各成一列。文件偏移与帧内容
+                // 一一对应，不以拼接假设代替布局。
+                for (const auto& part : spill_parts) {
+                    std::fprintf(stderr, "DBG part seq=%u offset=%llu filled=%llu data=%zu head=%s\n",
+                                 part.seq, static_cast<unsigned long long>(part.offset),
+                                 static_cast<unsigned long long>(part.filled), part.data.size(),
+                                 [&] { std::string hex; for (unsigned char c : part.data.substr(0, 8))
+                                           hex += "0123456789abcdef"[c >> 4], hex += "0123456789abcdef"[c & 15];
+                                       return hex; }().c_str());
+                    write_block(day_file(part.day).fd, part.offset, part.data);
+                }
+                for (const auto& part : spill_parts)
+                    runs_.at(part.key).chunks[part.seq].bytes = part.filled;
+                for (const auto& [key, pending] : pending_) {
+                    if (!pending.fit_bytes) continue;
+                    const Chunk& chunk = runs_.at(key).chunks[fit_targets.at(key)];
+                    write_block(day_file(key.first).fd, chunk.offset + chunk.bytes, pending.fit);
+                }
+            }
+            crash_at("after_append");
+            for (const auto day : touched) sync_file(day_file(day).fd, metrics_);
+            crash_at("after_sync");
+
+            // d) 内存推进（数据已在盘上）：run 计数/时间范围、fit chunk 已写字节；
+            //    spill chunk 的 bytes 已在文件写后逐 part 设置。
+            for (auto& [key, pending] : pending_) {
+                Run& run = runs_.at(key);
+                run.records += pending.records;
+                run.min_time = std::min(run.min_time, pending.min_time);
+                run.max_time = std::max(run.max_time, pending.max_time);
+                run.chunks[fit_targets.at(key)].bytes += pending.fit_bytes;
+                run.dirty = true;
+            }
+
+            // e) 元数据提交事务：chunk.bytes=filled + run 计数/范围 + day_alloc——
+            //    真正的提交点。
+            { metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
+            flush_metadata();
+            { metrics_.inc("sqlite_commit_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("COMMIT"); }
+            dirty_.clear();
+            pending_.clear();
+            pending_bytes_ = 0;
+            poisoned_ = false;
+            crash_at("after_metadata");
+    }
+
     bool any_day_file_present() const {
         std::error_code error;
         for (const auto& entry : fs::directory_iterator(directory_, error)) {
@@ -1896,7 +1967,7 @@ private:
             while ((rc = sqlite3_step(stmt.ptr)) == SQLITE_ROW)
                 allocated_end_[static_cast<std::uint64_t>(sqlite3_column_int64(stmt.ptr, 0))] =
                     static_cast<std::uint64_t>(sqlite3_column_int64(stmt.ptr, 1));
-            if (rc != SQLITE_DONE) db_->db_fail("load day allocation pointers");
+            if (rc != SQLITE_DONE) db_->db_fail("load day allocation pointer");
             reset_statement(*db_, stmt.ptr);
         }
         {
@@ -1940,58 +2011,65 @@ private:
         reset_statement(*db_, stmt.ptr);
     }
 
-    // 恢复：每个 run 从"当前 chunk 已写字节末尾"扫描到 chunk 容量边界或文件尾，
-    // 逐帧校验（len/CRC/归属 symbol）并采纳；撕裂帧或 chunk 末尾停止。chunk 之外
-    // 未 flush 的新 chunk 区域无元数据（死区，后续分配可复用）。文件短于持久
-    // chunk 位置 = 致命。
+    // 恢复：每个 run 从"当前 chunk 已写位置"扫描到 chunk 容量边界或文件尾，逐帧
+    // 校验（len/CRC/归属 symbol）并采纳；撕裂帧或 chunk 末尾停止（残余由下次写
+    // 覆盖）。chunk.bytes==0 也可能"分配后已写、未提交"——扫描从 chunk 起点起步。
+    // 文件短于持久已写位置 = 致命。
     void recover() {
         bool adopted_any = false;
         for (auto& [key, run] : runs_) {
             if (run.chunks.empty()) fail("day-run metadata run has no chunks");
-            Chunk& chunk = run.chunks[run.current_chunk];
-            // chunk.bytes==0 也可能"分配后已写、未 flush"——恢复扫描必须从
-            // chunk.offset 起步，不能跳过。
             File& file = day_file(key.first);
             struct stat status{};
             if (::fstat(file.fd, &status) < 0) system_failure("stat day-run file");
-            const std::uint64_t scan_end = std::min(chunk.offset + chunk.capacity,
-                                                    static_cast<std::uint64_t>(std::max<off_t>(status.st_size, 0)));
-            if (chunk.bytes && static_cast<std::uint64_t>(status.st_size) < chunk.offset + chunk.bytes)
-                fail("day-run file is shorter than durable metadata: day " + std::to_string(key.first) +
-                     " symbol " + key.second);
-            std::uint64_t scan = chunk.offset + chunk.bytes;
-            const std::uint64_t durable_bytes = chunk.bytes;
-            const std::uint64_t durable_records = run.records;
-            std::string length_bytes(4, '\0'), crc_bytes(4, '\0');
-            for (;;) {
-                if (scan + 8 > scan_end) break;  // chunk 保留边界：帧永不跨 chunk
-                if (!pread_exact(file.fd, length_bytes.data(), 4, scan)) break;
-                const auto length = static_cast<std::size_t>(read_le(length_bytes, 0, 4));
-                if (length == 0 || length > kMaxRecordBytes) break;  // 撕裂/垃圾帧
-                if (scan + 8 + length > scan_end) break;
-                std::string payload(length, '\0');
-                if (!pread_exact(file.fd, payload.data(), length, scan + 4)) break;
-                if (!pread_exact(file.fd, crc_bytes.data(), 4, scan + 4 + length)) break;
-                if (crc32(payload) != static_cast<std::uint32_t>(read_le(crc_bytes, 0, 4))) break;
-                Record record;
-                std::string decode_error;
-                if (!decode_record(payload, record, decode_error) || record.symbol != key.second) break;
-                scan += 4 + length + 4;
-                chunk.bytes = scan - chunk.offset;
-                run.records += 1;
-                run.min_time = std::min(run.min_time, record.time);
-                run.max_time = std::max(run.max_time, record.time);
+            const auto file_size = static_cast<std::uint64_t>(std::max<off_t>(status.st_size, 0));
+            // 每个 chunk 独立扫描：分配事务先于文件写（bytes=0 的 chunk 也可能有
+            // 已 fsync 的帧），漏扫前面的 chunk 会把已写帧当丢失。
+            for (unsigned seq = 0; seq < run.chunks.size(); ++seq) {
+                Chunk& chunk = run.chunks[seq];
+                const std::uint64_t scan_end = std::min(chunk.offset + chunk.capacity, file_size);
+                if (chunk.bytes && file_size < chunk.offset + chunk.bytes)
+                    fail("day-run file is shorter than durable metadata: day " + std::to_string(key.first) +
+                         " symbol " + key.second + " chunk " + std::to_string(seq));
+                const std::uint64_t durable_bytes = chunk.bytes;
+                std::uint64_t adopted_before = 0;
+                std::uint64_t scan = chunk.offset + chunk.bytes;
+                std::string length_bytes(4, '\0'), crc_bytes(4, '\0');
+                for (;;) {
+                    if (scan + 8 > scan_end) break;  // chunk 保留边界：帧永不跨 chunk
+                    if (!pread_exact(file.fd, length_bytes.data(), 4, scan)) break;
+                    const auto length = static_cast<std::size_t>(read_le(length_bytes, 0, 4));
+                    if (length == 0 || length > kMaxRecordBytes) break;  // 撕裂/垃圾帧
+                    if (scan + 8 + length > scan_end) break;
+                    std::string payload(length, '\0');
+                    if (!pread_exact(file.fd, payload.data(), length, scan + 4)) break;
+                    if (!pread_exact(file.fd, crc_bytes.data(), 4, scan + 4 + length)) break;
+                    if (crc32(payload) != static_cast<std::uint32_t>(read_le(crc_bytes, 0, 4))) break;
+                    Record record;
+                    std::string decode_error;
+                    if (!decode_record(payload, record, decode_error) || record.symbol != key.second) break;
+                    scan += 4 + length + 4;
+                    chunk.bytes = scan - chunk.offset;
+                    run.records += 1;
+                    run.min_time = std::min(run.min_time, record.time);
+                    run.max_time = std::max(run.max_time, record.time);
+                    ++adopted_before;
+                }
+                if (chunk.bytes != durable_bytes) {
+                    run.dirty = true;
+                    dirty_.insert(key);
+                    metrics_.inc("recovered_tail_records", adopted_before);
+                    metrics_.inc("recovered_tail_bytes", chunk.bytes - durable_bytes);
+                    recovered_tail_records_ += adopted_before;
+                    recovered_tail_bytes_ += chunk.bytes - durable_bytes;
+                    adopted_any = true;
+                    // 恢复推进到了后续 chunk：current 指向最后一个有数据的 chunk。
+                    if (chunk.bytes)
+                        run.current_chunk = seq > run.current_chunk ? seq : run.current_chunk;
+                }
+                allocated_end_[key.first] =
+                    std::max(allocated_end_[key.first], chunk.offset + chunk.capacity);
             }
-            if (run.records != durable_records) {
-                run.dirty = true;
-                dirty_.insert(key);
-                metrics_.inc("recovered_tail_records", run.records - durable_records);
-                metrics_.inc("recovered_tail_bytes", chunk.bytes - durable_bytes);
-                recovered_tail_records_ += run.records - durable_records;
-                recovered_tail_bytes_ += chunk.bytes - durable_bytes;
-                adopted_any = true;
-            }
-            allocated_end_[key.first] = std::max(allocated_end_[key.first], chunk.offset + chunk.capacity);
         }
         if (adopted_any) {
             { metrics_.inc("sqlite_begin_calls"); metrics_.inc("sqlite_exec_calls"); db_->exec("BEGIN IMMEDIATE"); }
@@ -2051,10 +2129,11 @@ private:
     std::map<std::uint64_t, File> day_files_;
     std::map<std::uint64_t, std::uint64_t> allocated_end_;
     std::map<RunKey, Run> runs_;
+    std::map<RunKey, Pending> pending_;
+    std::uint64_t pending_bytes_ = 0;
     std::set<RunKey> dirty_;
     Statement flush_run_, flush_chunk_, flush_alloc_;
     bool poisoned_ = false;
-    unsigned batches_since_flush_ = 0;
     std::uint64_t recovered_tail_records_ = 0, recovered_tail_bytes_ = 0;
     std::optional<std::uint64_t> duplicates_;
 };

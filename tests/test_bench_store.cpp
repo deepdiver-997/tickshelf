@@ -876,6 +876,7 @@ TEST_CASE("bench_store: day-run failpoints adopt fsynced frames; metadata flush 
     auto store = opened(options, metrics);
     std::string error;
     REQUIRE(store->write({sample(0)}, error));
+    REQUIRE(store->finish(error));  // v3：write 落在内存缓冲，finish 保证落盘
     store.reset();
     const auto data_file = [&] {
         const auto layout = fs::path(options.directory) / "segment-day-v1";
@@ -893,7 +894,10 @@ TEST_CASE("bench_store: day-run failpoints adopt fsynced frames; metadata flush 
         std::string child_error;
         auto child_store = open_store(options, child_metrics, child_error);
         if (!child_store) ::_exit(70);
-        child_store->write({sample(1), sample(2)}, child_error);
+        // 同 symbol 的 300 条（id 步长 54）≈ 90KB > 64KiB chunk → 溢出触发 flush
+        std::vector<EncodedRecord> batch;
+        for (unsigned i = 0; i < 300; ++i) batch.push_back(sample(1 + 54u * i));
+        child_store->write(batch, child_error);
         ::_exit(71); // A failpoint must not return or run stack unwinding.
     }
     int status = 0;
@@ -905,21 +909,22 @@ TEST_CASE("bench_store: day-run failpoints adopt fsynced frames; metadata flush 
     CHECK(fs::file_size(data_file) > confirmed_size);  // 帧已落盘（after_sync 场景已 fsync）
     Metrics recovery_metrics;
     store = opened(options, recovery_metrics);
-    CHECK(recovery_metrics.counters.at("recovered_tail_records") == 2);
+    CHECK(recovery_metrics.counters.at("recovered_tail_records") == 300);
     CHECK(recovery_metrics.counters.at("recovered_tail_bytes") > 0);
     const auto rows = exported(*store);
-    CHECK(rows.size() == 3);  // 采纳：fsynced 但未提交的帧活下来了
-    CHECK(hexes(rows) == expected_hexes({sample(0), sample(1), sample(2)}));
+    CHECK(rows.size() == 301);  // 采纳：fsynced 但未提交的帧活下来了
     // 重试重写同一批：采纳过的帧再次写入 → 物理重复，逻辑集合不变。
-    REQUIRE_MESSAGE(store->write({sample(1), sample(2)}, error), error);
+    std::vector<EncodedRecord> retry_batch;
+    for (unsigned i = 0; i < 300; ++i) retry_batch.push_back(sample(1 + 54u * i));
+    REQUIRE_MESSAGE(store->write(retry_batch, error), error);
     REQUIRE(store->finish(error));
     const auto retried = exported(*store);
-    CHECK(retried.size() == 5);
+    CHECK(retried.size() == 601);
     std::set<std::string> logical;
     for (const auto& row : retried) logical.insert(row.hex);
-    CHECK(logical.size() == 3);
+    CHECK(logical.size() == 301);
     Json info(store->info_json());
-    CHECK(info.value["physical_duplicate_rows"].get_uint64().value() == 2);
+    CHECK(info.value["physical_duplicate_rows"].get_uint64().value() == 300);
     CHECK(hexes(ranged(*store, sample(1).symbol, sample(1).time, sample(1).time)) ==
           expected_hexes({sample(1)}));
     }
@@ -932,6 +937,7 @@ TEST_CASE("bench_store: day-run after_metadata failpoint commits exactly the flu
     auto store = opened(options, metrics);
     std::string error;
     REQUIRE(store->write({sample(0)}, error));
+    REQUIRE(store->finish(error));  // v3：显式提交（write 落在内存缓冲）
     store.reset();
     const pid_t child = ::fork();
     REQUIRE(child >= 0);
@@ -941,8 +947,11 @@ TEST_CASE("bench_store: day-run after_metadata failpoint commits exactly the flu
         std::string child_error;
         auto child_store = open_store(options, child_metrics, child_error);
         if (!child_store) ::_exit(70);
-        for (unsigned batch = 0; batch < 8; ++batch)  // 同 symbol：第 8 批 flush 后崩溃（第 9 批不执行）
-            child_store->write({sample(1)}, child_error);
+        // 同 symbol（id 步长 54）260 条 ≈ 78KB > 64KiB chunk 剩余 → 第 1 批即溢出
+        // 触发 flush，after_metadata 在该批提交点后崩溃（后续批不执行）。
+        std::vector<EncodedRecord> batch_records;
+        for (unsigned i = 0; i < 260; ++i) batch_records.push_back(sample(1 + 54u * i));
+        child_store->write(batch_records, child_error);
         ::_exit(71);
     }
     int status = 0;
@@ -953,14 +962,14 @@ TEST_CASE("bench_store: day-run after_metadata failpoint commits exactly the flu
     CHECK(WTERMSIG(status) == SIGKILL);
     Metrics recovery_metrics;
     store = opened(options, recovery_metrics);
-    // 元数据 flush 已提交（提交点）：8 个崩溃批的帧 + parent 1 条全部持久，无采纳尾部
-    //（无采纳 = 计数键不出现，而不是冒报 0）。
+    // 元数据提交事务已完成（提交点）：child 批 1 的 260 帧 + parent 1 条全部持久，
+    // 无采纳尾部（无采纳 = 计数键不出现，而不是冒报 0）。
     CHECK_FALSE(recovery_metrics.counters.count("recovered_tail_records"));
     CHECK_FALSE(recovery_metrics.counters.count("recovered_tail_bytes"));
-    CHECK(exported(*store).size() == 9);
-    REQUIRE(store->write({sample(10)}, error));
+    CHECK(exported(*store).size() == 261);
+    REQUIRE(store->write({sample(999999)}, error));
     REQUIRE(store->finish(error));
-    CHECK(exported(*store).size() == 10);
+    CHECK(exported(*store).size() == 262);
 }
 
 TEST_CASE("bench_store: compact fixed32 digest collisions compare the full payload in every reuse/model mode") {

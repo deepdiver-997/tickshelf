@@ -121,9 +121,9 @@ python3 scripts/engine_bench.py --suite native --build build-bench-release \
 | `sqlite_compact` | 无数据文件，canonical 入库 | 每记录 1 行候选查找 | SQL 索引 |
 | `rocksdb` | canonical 作 value | 每记录 1 次 Seek | Seek 迭代器 |
 | `segment` | 到达顺序批帧（TSG1） | 1 行段 + 每 symbol 1 行范围 | 候选段整读＋过滤 |
-| `segment_day` | 按 (UTC 日, symbol) 连续 run（TSD1，chunk 化保留区） | 每 run/chunk 1 行，每 8 批才 flush 一次 | 直接定位该 symbol 的 run 顺序读＋过滤 |
+| `segment_day` | 按 (UTC 日, symbol) 连续 run（TSD1，chunk 化保留区） | 每 run/chunk 1 行，按刷盘批次更新 | 直接定位该 symbol 的 run 顺序读＋过滤 |
 
-`segment_day` 是"本体先行＋稀疏元数据"的参考实现：提交点是元数据 flush（默认每 8 批），崩溃丢失窗口 = 未 flush 的批；恢复逐帧校验（len/CRC/归属 symbol）**采纳**已 fsync 的有效帧，撕裂帧处停止、由下次写覆盖。它对单 symbol 范围查询只读该 symbol 自己的字节（无跨 symbol 过滤浪费），代价是每批对每个出现的 symbol 各一次 pwrite——写模式从"一次顺序追加"变成"按 symbol 散布"，盘越慢这个代价越真实。同口径对照命令：
+`segment_day` 是"本体先行＋稀疏元数据"的参考实现（按用户设计定稿）：进程内持有全部 symbol 的当前可写块状态；`write` 只做内存分流——能装进当前 chunk 剩余空间的帧进**增量缓冲**（攒批），装不下的进溢出缓冲；write 末尾有溢出或缓冲达 8MiB 上限时刷盘一次：按帧边界贪心申请 N 个新 chunk（**一个 SQLite 事务先登记分配**），溢出数据按分配序合并为顺序写（新 chunk 在文件尾连续），增量每 symbol 一次 pwrite，fsync 后元数据提交事务才是提交点。崩溃丢失窗口 = 内存缓冲 + 未 flush 批；恢复逐帧校验（len/CRC/归属 symbol/chunk 边界）**采纳**已 fsync 的有效帧，撕裂帧停止、残余由下次写覆盖。它对单 symbol 范围查询只读该 symbol 自己的字节（无跨 symbol 过滤浪费）；写侧固有代价是增量散布 pwrite（POSIX 无带偏移的 scatter-gather，能顺序化的只有溢出部分）——缓冲摊销其频率，但摊销不掉其存在。同口径对照命令：
 
 ```sh
 python3 scripts/pipeline_bench.py --build build-record-release \

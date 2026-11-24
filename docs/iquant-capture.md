@@ -37,6 +37,12 @@ python3 -B examples/iquant/receiver.py --work-dir /path/to/instance-a \
   --engine-bin ./build-iquant/iquant_engine --redis-port 6379
 ```
 
+如果用 Visual Studio 生成器，PowerShell 启动示例如下。路径按实际构建输出调整。
+
+```powershell
+py -3 -B .\examples\iquant\receiver.py --work-dir .\run\instance-a --engine-bin .\build-iquant\Release\iquant_engine.exe
+```
+
 `--work-dir` 内含 `raw/`、`history.sqlite3` 及 WAL、进度与锁文件。接收器和
 C++ worker 各持有独占锁，强杀接收器后旧 worker 退出前仍会占用自己的锁。
 多实例使用各自的目录与来源端口。配置独立的 Redis 端口和数据目录可以一并隔离
@@ -48,12 +54,15 @@ Redis 文件。省略 `--redis-port` 时只处理历史库。共享 Redis 时各
 可以重放。SQLite 使用 `FULL` 同步，在 macOS 上也开启 `fullfsync`。
 
 - 接收端在 raw 同步后发 ACK，随后提交已同步范围的通知。最新的一组可在内存中直接交给解析器。忙时新的通知覆盖上一组，后台始终以已同步的文件范围为准补齐积压。
-- 每轮先处理一组最近数据，再处理一组历史，历史流轮转，每组至多 32 帧和约 4 MiB。历史库故障时接收继续，worker 重试时从库中恢复游标。关注 raw 和数据库的可用盘容量，并用 `raw/progress.json` 的 `resume_watermark` 与 `replay_cursor.last_seq` 比较处理进度。
+- 每轮先处理一组最近数据，再处理一组历史，历史流轮转，每组至多 32 帧和约 4 MiB。历史库故障时接收继续，worker 重试时从库中恢复游标。
 - 变长记录 schema 为 `iqts-snapshot/v1`，SQLite 中有对应版本登记。每条保存完整证券代码、可空的 SDK `time` 毫秒值及原样的快照 JSON 字节。整数、小数、数组、空值、非有限数和扩展字段保留在字节中。用 `(stream, batch_seq, ordinal)` 识别一条交付记录，同毫秒的不同交付可以并存。批号以 20 位数字文本保存，覆盖 IQTS 的无符号 64 位范围。
 - `raw_frames` 同时记录原文件偏移、CRC、GAP 和隔离状态。无法解析的整批保留在 raw 中，通过状态 `quarantine` 定位。源端缺失和本地待处理积压可分别对账。记录、帧状态和可推进的连续游标在同一事务提交。实时批可在较早批次追赶前按来源身份先落盘。连续游标等扫过缺口之前的积压才继续前进。
 - 热发布在历史批提交后进入有界队列，积压、Redis 错误或重启可能跳过该次发布。后台补扫直接写历史库。Stream 包含来源流、批号、schema 以及按批内位置编号的证券和快照字段，使用近似 10,000 条 Stream 记录的上限。
 
-本地查询示例。
+## 对账和故障处理
+
+在实例目录中打开只读会话 `sqlite3 -readonly history.sqlite3`。查询同一来源流
+的处理位置和异常帧。
 
 ```sql
 SELECT source_time_ms, CAST(snapshot AS TEXT)
@@ -62,13 +71,26 @@ WHERE symbol='IO2712-C-6000.IF'
   AND source_time_ms BETWEEN 1700000000000 AND 1700001000000
 ORDER BY source_time_ms;
 
-SELECT stream, first_seq, last_seq, status, detail
+SELECT stream, first_seq, last_seq, byte_start, byte_end, status, detail
 FROM raw_frames WHERE status IN ('gap', 'quarantine');
+
+SELECT stream, raw_end, last_seq FROM replay_cursor;
 ```
 
-做整目录备份时先停实例并等 worker 退出，再一起复制 raw 和 SQLite，包括
-当时存在的 WAL。恢复到空工作目录后启动实例，游标和帧状态会核验 raw 是否存在。
-仅保留 raw 也可重建历史库。Redis Stream 可以作为独立的短期热数据管理。
+| 现象 | 排查位置 |
+|---|---|
+| 接收正常，历史进度落后 | 按 `stream` 对照 `raw/progress.json` 的 `resume_watermark` 和 `replay_cursor.last_seq`。后者是固定宽度的数字字符串，未建游标的流从零开始。差值表示待顺序核对的批号跨度，也可能包含已提前入库的实时批或 GAP。持续扩大时检查 worker 日志和磁盘剩余空间。 |
+| 历史进度正常，但有缺失 | 查询 `raw_frames`。 `gap` 表示来源端当前无法重放，`quarantine` 表示原文已保存，需要检查解析或提供端数据。可按记录中的 `byte_start`、`byte_end` 定位原帧。 |
+| 历史库有记录，Redis 查不到 | 检查端口、Stream 键、队列满和发布失败日志。后台补扫只补历史库。 |
+| 路径锁报错 | 检查同目录的接收进程或强杀后仍在退出的 worker。应保留锁文件，由持有进程退出释放锁。 |
+
+## 备份与恢复
+
+1. 停止接收器，确认 worker 已退出。若来源策略继续推送，停机期间能否重放取决于策略的内存窗口。
+2. 一起复制 `raw/`、`history.sqlite3` 和当时存在的 SQLite WAL。将备份恢复到空工作目录。
+3. 启动实例后核对各流的接收进度、历史游标、GAP 与隔离记录，抽查证券范围查询。仅从 raw 恢复时，worker 会在空历史库重建记录和游标。
+
+raw 目前需要人工规划保留空间。实例启动时核验历史库所引用的 raw 文件，归档和清理需同时考虑所有这些引用。Redis Stream 可以作为独立的短期热数据管理。
 
 运行包含连续强杀和 Redis 堵塞的测试。
 

@@ -1,7 +1,8 @@
 # Delivery and durability contract
 
 **Contract ID: `tickshelf-delivery-v1-20261117`**. This is the current boundary for
-TTAP services, the optional Engine, and benchmark interpretation. It does not
+TTAP services, the TTAP Engine, and benchmark interpretation. The separate
+[IQTS delivery contract](#9-iquant-iqts-delivery-contract) covers iQuant. This document does not
 change the TTAP wire version, startup defaults, or any final-Storage sync policy.
 Where older prose implies a bounded loss window or unconditional recovery, this
 contract supersedes that implication.
@@ -117,9 +118,10 @@ Enforcement of that watermark bound is structural, not aspirational:
 - **Index commit failure opens a gap.** The watermark freezes at the failed
   frame's `seq_first` (the end of the last contiguous committed prefix).
   Subsequent batches keep committing and keep appending to raw, but the
-  watermark does not advance across the gap; the next open replays
-  `[watermark, raw end)` idempotently, closing the gap and the later frames in
-  one pass. A watermark that jumped the gap would make recovery skip the
+  watermark does not advance across the gap. While idle, the storage worker retries
+  one frame at a time and advances the contiguous prefix after each success.
+  Reopen replays the remaining suffix from the persisted watermark. A watermark
+  that jumped the gap would make recovery skip the
   un-committed frames forever — that ordering ("fail, then keep writing, then
   reopen") is regression-tested.
 - **Raw append/sync failure truncates back.** Frame bytes may have partially or
@@ -248,3 +250,29 @@ provenance requirements remain in force. **DCRB: `not_adapted`**; this contract
 does not claim a DCRB adapter or protocol compatibility. See
 [full-record-benchmark.md](full-record-benchmark.md) for the distinct capture,
 replay, and production-qualification gates.
+
+## 9. iQuant IQTS delivery contract
+
+IQTS has three observable completion points.
+
+| Stage | Commitment |
+| --- | --- |
+| Raw ACK | The receiver appended the DATA or GAP frame and returned successfully from raw file `fsync` before sending the corresponding ACK. |
+| History commit | `iquant_engine` committed decoded rows and a frame entry in SQLite, together with any contiguous replay cursor advance. The worker explicitly sets WAL and `synchronous=FULL`, with SQLite `fullfsync=ON` on macOS. |
+| Redis publication | A recent committed batch was accepted by the optional Redis Stream. Publication is best effort, with a bounded queue and no historical republish. |
+
+After a crash, the receiver validates the raw archive and reconstructs the
+receive watermarks. `data_watermark` counts the contiguous DATA prefix of a
+single source stream. `resume_watermark` can also advance over durable GAP
+entries. The separate SQLite replay cursor is the contiguous prefix that has
+been accounted for in history, including GAP and quarantined frames. Recent
+frames can commit ahead of that cursor. A quarantined frame retains its raw
+bytes and a diagnostic but contributes no quote rows.
+
+The history key `(stream, batch_seq, ordinal)` makes replay idempotent for the
+same delivery position. Distinct deliveries with the same symbol and timestamp
+can both be retained. The source keeps only a bounded replay window in memory.
+Unconfirmed batches may be lost if that window overflows or the source process
+restarts. The receiver uses portable file `fsync`; on Windows it has no
+portable directory sync. Restore procedures and platform details are in the
+[iQuant capture runbook](iquant-capture.md).

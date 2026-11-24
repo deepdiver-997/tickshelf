@@ -131,9 +131,18 @@
 - [x] 实测：4 分片端到端写穿 SENT 419,968 = ROWS 419,968，四文件均匀分布（104,992/片），组内零重复零故障行；单测路由确定性/跨 flush 幂等/N=1 退化
 - 备案：rebalance（改 N 重哈希迁移）不做——迁移账本思路同 ADR-018；拉取配置热更新备案在 ADR-018 决定 6（配置是数据不是语法，适配层职责）
 
+## iQuant 快照主链路 ✅（2026-11-25）
+
+- [x] IQTS raw 同步后 ACK，文件重放与 GAP 可对账。
+- [x] SQLite 变长历史库、可选 Redis Stream 热发布和工作目录独占锁。
+- [x] 验证两次强杀后的历史追赶，以及 Redis 堵塞时继续接收和历史写入。
+- [ ] 实际券商行情样本的字段、覆盖和时间语义验证。目标机器持续摄入、并发查询及备份恢复压测。
+
+见 [iQuant 操作手册](iquant-capture.md) 和 [ADR-029](design.md#adr-029-iquant-先确认-raw再处理历史库与热发布2026-11-25)。
+
 ## M4（可选）存储扩展
 
 - PG 后端（`ON CONFLICT` / COPY）与 SQLite 行为对比记录——存储后端**不做预抽象**：`SqliteTickStore` 的四个方法（open / upsert_flush / query_range / count）就是事实接口缝，第二个后端真实落地时再提取接口（rule of three / ADR-003 死代码纪律）
-- ClickHouse POC：列存压缩比、范围扫描、ReplacingMergeTree 去重、异步 insert，拿实测数字
-- Parquet 冷层 + DuckDB 查询验证
+- [x] 对照 iQuant 形状数据的 SQLite、Parquet + DuckDB 和嵌入式 ClickHouse MergeTree 的空间、批量导入与热范围查询。见 [本机存储对照](iquant-storage-benchmark.md)。
+- [ ] ClickHouse 持续摄入、并发查询与去重验证。Parquet 冷层的增量归档、目录发布与恢复验证。
 - （更远）共享内存环接入路径，替换 localhost TCP（ADR-009 代价项）

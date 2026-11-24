@@ -1,6 +1,6 @@
 # tickshelf
 
-把行情流"摘"下来、分层上架的 C++20 管线：模拟行情源 → 采集 → Redis 热缓冲 → 租约式幂等落盘 → 水位淘汰。**全组件从零实现**——不用 hiredis、不用 asio，Redis 协议（RESP）手写。
+TickShelf 有两条行情管线。TTAP 走 Redis 热缓冲和租约式落盘，适用于固定 64B Tick。iQuant 走 IQTS，先保存行情快照原文并确认接收，再由 C++ worker 处理变长历史记录，可选发布到 Redis Stream。Redis 客户端使用手写 RESP。
 
 ## 为什么做这个
 
@@ -15,9 +15,9 @@
 
 ## 架构与数据流
 
-实然架构、三条数据路径（摄入/攒批冲刷/租约落盘）、崩溃窗口与恢复语义，见 [docs/architecture.md](docs/architecture.md)；v1 范围与里程碑见 [docs/roadmap.md](docs/roadmap.md)。
+两条管线的进程边界、数据流与崩溃恢复见 [架构说明](docs/architecture.md)。已交付和待验证的范围见 [里程碑](docs/roadmap.md)。
 
-**交付/耐久合同 [`tickshelf-delivery-v1-20261117`](docs/delivery-contract.md)**：最终 Storage
+**TTAP 交付/耐久合同 [`tickshelf-delivery-v1-20261117`](docs/delivery-contract.md)**：最终 Storage
 提交前允许永久丢失，在途、accepted、staging、Redis pending 均不耐久，**没有固定 RPO**。
 `accepted` ≠ `published` ≠ `storage_committed`，后者强度取决于实际 backend/sync；TTAP
 当前无摄入 ACK，不承诺上游重放。Redis 可无 AOF/RDB且不是恢复权威；服务 SQLite 保持
@@ -33,18 +33,35 @@ driver(任意语言) ──TCP·TTAP──▶ tickshelfd ──RESP──▶ Red
                                进程内 ingest API        SQLite
 ```
 
-- **接入契约**：[docs/protocol.md](docs/protocol.md) 的 TTAP 二进制协议是**官方接入接口**——任何能开 TCP 的语言都能喂行情（`examples/driver.py`：~100 行纯 struct 手打包的 Python 驱动即证明）。数据源驱动生产上由接入方自研（协议/账号/限流都是源特定的），本项目只规范"数据进来之后"。
+- **TTAP 接入**：任意支持 TCP 的语言都可以按二进制协议发送行情，仓库包含 Python 参考驱动。见 [TTAP 协议](docs/protocol.md)。
 - **feedgen**：参考驱动（C++），模拟行情源：随机游走 + 开盘/收盘突发；M3 加乱序/重复/断流混沌模式。只用模拟数据——repo 自包含，也回避真实行情数据的授权问题。
 - **tickshelfd**：守护进程。收帧（CRC 校验）→ 核心库 ingest → 按固定时间间隔攒批写 Redis。可重启，但未提交数据不是耐久状态，崩溃可能永久丢失。
 - **libtickshelf**：核心组件库（攒批、RESP 客户端、租约落盘），暴露进程内 ingest API，测试直连不走网络。
 - **persister**：独立进程。租约认领 → 幂等落库 → 改标记。多实例安全。
-- **evictor / SDK / 多源切换**：后续里程碑。
+- **evictor / queryd**：分别负责热缓存淘汰和 TTAP 热冷合并查询。
+
+**iQuant 接入**以 raw 同步作为 ACK 边界。SQLite 事务提交历史记录与处理进度，后台从 raw 补扫，Redis Stream 只承载可选热发布。历史查询使用实例目录的 `history.sqlite3`。见 [iQuant 交付边界](docs/delivery-contract.md#9-iquant-iqts-delivery-contract)。
 
 ## 设计决定
 
 全部取舍记录在 [docs/design.md](docs/design.md)（ADR 格式），包括：为什么热缓冲用 Redis 不用消息队列、为什么 v1 落库用 SQLite 不用 PG、为什么按时间间隔攒批不按条数、租约为什么不是正确性保障而只是效率优化。
 
 ## 快速开始
+
+### iQuant 快照采集与历史处理
+
+安装 SQLite 开发库并构建 worker。启动接收器前，按操作手册配置 iQuant 策略、回环端口和两端共用的环境变量 `TS_IQUANT_TOKEN`。
+
+```sh
+cmake -S . -B build-iquant -DTICKSHELF_IQUANT_ENGINE_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-iquant --config Release
+python3 -B examples/iquant/receiver.py --work-dir ./run/iquant \
+  --engine-bin ./build-iquant/iquant_engine
+```
+
+实例独占工作目录，raw、进度和 SQLite 均保存在目录内。可加 `--redis-port 6379` 开启热发布。证券订阅、Windows 启动、恢复与备份见 [iQuant 操作手册](docs/iquant-capture.md)，SQLite、Parquet 和 ClickHouse 的导入、查询及空间占用见 [本机存储对照](docs/iquant-storage-benchmark.md)。
+
+### TTAP 服务
 
 前置：CMake ≥ 3.24、C++20 编译器、本地 Redis（`brew install redis && brew services start redis`）。
 

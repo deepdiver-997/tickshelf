@@ -1,8 +1,7 @@
 # 架构与数据流
 
-> 本文是 M1 实现后的**实然架构**描述（as-built），与设计取利的差异看 design.md 的 ADR。
-> 线格式与键空间见 protocol.md；里程碑划分见 roadmap.md。
-> 当前交付/耐久边界以 [`tickshelf-delivery-v1-20261117`](delivery-contract.md) 为准：
+> TTAP 线格式和键空间见 [TTAP 协议](protocol.md)。iQuant 可经 IQTS 独立运行，见 [采集手册](iquant-capture.md)。
+> TTAP 交付和耐久边界以 [`tickshelf-delivery-v1-20261117`](delivery-contract.md) 为准。
 > 最终 Storage 提交前允许永久 loss，没有固定 RPO；Redis（可无 AOF/RDB）不是恢复权威。
 > `accepted` ≠ `published` ≠ `storage_committed`；TTAP 无摄入 ACK，不承诺上游 replay。
 > 服务 SQLite 保持现有设置，以实际连接 PRAGMA 回读解释，不断言默认 FULL；显式 FULL 部署不得降级。
@@ -32,7 +31,37 @@ feedgen / driver.py ──TCP·TTAP帧──▶ tickshelfd ──RESP pipeline�
 - **libtickshelf**：核心库，tickshelfd 与 persister 都只是薄入口（`main.cpp` 各 ~200 行），
   可测试性靠直连核心库（测试不开网络）。
 
-## 数据流转（三条路径）
+## iQuant 数据流与恢复
+
+```text
+iQuant SDK → Python 策略 → IQTS (TCP 回环) → 接收器 → raw 文件同步
+                                 ▲                │
+                                 └────── ACK ─────┘
+                                                    │
+                                 内存中的最新批 + 从 raw 顺序补扫
+                                                    ↓
+                          解析变长快照 → iquant_engine → SQLite 历史库
+                                                             │
+                                最近已提交批 → 有界队列 → Redis Stream（可选）
+```
+
+接收器持有实例目录的锁，C++ worker 另持有一把写入锁。Python 调度先尝试一组近期
+数据，再尝试一组历史帧。实时通知覆盖时，待处理数据留在 raw 中。worker 为 SQLite
+的单写者，按 `(stream, batch_seq, ordinal)` 标识快照，提交记录、帧状态和可推进的
+连续游标。新批可以先入库，游标等补扫经过完整前缀后才推进。回放时核对已提交帧的
+元数据，避免再次插入记录。历史补扫直接写历史库。
+
+| 事件 | 恢复结果 |
+|---|---|
+| raw 已同步，ACK 未到或通知丢失 | 重启扫描 raw 校验帧并恢复接收进度，历史 worker 从 SQLite 游标补扫 |
+| 历史提交失败或进程中断 | 编码和事务可从 raw 重做，来源身份保持稳定 |
+| 源端窗口溢出或收到不可解析快照 | 分别登记为 `gap` 和 `quarantine`，缺失数据保持可见 |
+| Redis 不可用或发布队列满 | 热层可能缺少该批，历史事务与接收继续独立推进 |
+
+历史查询连接 `history.sqlite3`，热消费者读取 Redis Stream。目录布局、查询示例和
+备份恢复步骤见 [iQuant 操作手册](iquant-capture.md)。
+
+## TTAP 数据流转（三条路径）
 
 ### ① 摄入路径（tickshelfd 主循环内，微秒级）
 

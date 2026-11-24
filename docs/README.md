@@ -6,11 +6,11 @@
 
 | 文档 | 内容 |
 |---|---|
-| [architecture.md](architecture.md) | 实然架构：三条数据路径、崩溃窗口、恢复语义 |
+| [architecture.md](architecture.md) | TTAP 与 iQuant 的进程边界、数据流和恢复 |
 | [design.md](design.md) | 全部 ADR（含 ADR-023 分片引擎、ADR-024 交付边界） |
 | [protocol.md](protocol.md) | TTAP 接入契约（官方跨语言接口） |
 | [configuration.md](configuration.md) | 配置语法、路径、覆盖规则、Redis 运行态快照 helper |
-| [delivery-contract.md](delivery-contract.md) | 交付/耐久合同 `tickshelf-delivery-v1-20261117`：提交前允许丢失、Redis 非耐久权威 |
+| [delivery-contract.md](delivery-contract.md) | TTAP 交付合同 `tickshelf-delivery-v1-20261117` 与 iQuant 的 raw ACK、历史提交、热发布边界 |
 | [roadmap.md](roadmap.md) | 里程碑与范围 |
 | [benchmarks.md](benchmarks.md) | 未测清单总账 |
 | [review-brief.md](review-brief.md) | 评审摘要 |

@@ -251,6 +251,7 @@
 - **背景**：StorageOnly 路径没有 Redis 副本，"最终提交前允许丢失"的窗口即每次 Storage 提交前的全部在途数据；索引提交本身也缺一个可重放的本地权威。
 - **决定**：`RawJournalShard`（StorageShard 装饰器）：每批先追加 raw 帧（`u32 count + u64 seq_first + 64B ticks`，版本戳文件头）并 `F_FULLFSYNC`/`fsync`，**之后**才调用内层 Storage 提交；raw 追加失败则索引绝不提交。索引提交失败 → raw 已留痕，下次 open 重放（幂等 upsert）补齐。水位文件 `<shard>.raw.wm` 经临时文件+fsync+rename+目录 fsync 原子落盘，open 时钉住、此后每 32 次提交摊销——它是**恢复游标不是耐久承诺**：落后无害（多重放一段），超前即违约。撕裂尾部（崩溃半帧）在 open 时按最后完整帧边界截断并计数；水位之后不足整帧的尾部按幂等重放。
 - **拒绝的替代**：查询时 digest 校验兜底（把静默损坏升级为可检测丢失，但违反"提交后不允许错误"）；先提交索引再补 raw（顺序颠倒使第三象限成立）；每批一次水位落盘（多一次 fsync，收益只是重放更短）。
+- **运行中追赶**：索引失败后，空闲分片每次重试一个已同步的 raw 帧。成功后才推进连续前缀，重启仍从落盘水位重放。
 - **边界**：仅限 `--engine --persist storage --raw-journal` 单写者路径；写穿以 Redis 租约为恢复权威不叠加。raw 同步不是跨资源事务，故障窗口语义见 [delivery-contract §4.1](delivery-contract.md)。macOS fsync 的 barrier 语义不做断言，能探测到 F_FULLFSYNC 时使用之。分布式拓扑的 raw 所有权与水位语义在合同 §8 声明为边界，不实现。
 
 ## ADR-028 写穿两级流水线：发布 RTT 与存储提交重叠（2026-11-18）
@@ -261,7 +262,18 @@
 - **边界**：流水线不减少任何工作，只重叠等待；吞吐上界仍是两段中较慢的一段（Little 定律）。`inflight` 翻倍内存语义（ready+handoff 各 inflight 个切片）。finish 晚于提交的合同语义不变（finish_pending 单独计数）。NullRedis/NullStorage 组合在流水线下行为与单级一致。
 - **首轮实测（2026-11-18，Mac、10k 条/64 证券/2 分片/批 256、每格独立 warmup、单轮）**：native 十六格全 PASS，但方向分化——I/O 等待主导的格 pipeline=on 明显更快（real+null：558k→728k 条/s；null+sqlite FIFO on：679k→729k），而 **real+sqlite 关键格反而慢约 8–30%**（397k→309k、331k→282k）。原因：该规模下 SQLite 提交每批仅亚毫秒，两级交接的锁/唤醒开销与第二条连接成本占比超过重叠收益。结论与决定一致：**保持默认关**；当存储提交变重（更大批量、FULL 同步、数毫秒级）时重叠收益才可能显现，需在目标负载同口径重测后再评估。单轮小样本不构成吞吐结论。
 
-## 数据模型（Redis）
+## ADR-029 iQuant 先确认 raw，再处理历史库与热发布（2026-11-25）
+
+- **决定**：IQTS 接收端同步 raw 后回复 ACK，近期批优先交给 iQuant worker，
+  历史任务按流轮转补扫。SQLite 保存变长快照、帧状态与连续处理进度，Redis Stream
+  接收已提交的近期批。接收器与写入 worker 分别持有实例目录中的独占锁。
+- **身份与演进**：`iqts-snapshot/v1` 保留快照 JSON 字节，索引使用完整证券代码和
+  可用的 SDK 时间。来源流、批号和批内位置保证重放幂等。同毫秒的不同交付可以并存。
+- **取舍**：历史进度可以在通知覆盖、存储失败后重建。Redis 可丢弃热发布，
+  历史补扫承担恢复。历史先提交会把提交延迟计入热可见延迟。
+  交付边界见 [IQTS 合同](delivery-contract.md#9-iquant-iqts-delivery-contract)。
+
+## 数据模型（TTAP Redis）
 
 - ~~行情键 `ts:{symbol}:{yyyymmdd}`（v1 逐 tick ZSET，member=64B Tick 原始字节）~~ — ADR-017 起退役（dev 期 flag-day 换段式；生产期格式迁移走 ADR-018 双读配方）
 - 租约键：`lease:{批id}` — SET NX EX，TTL 60s，worker 每 20s 续期（**保留逐批键形态**——需要 per-key TTL，HASH field 独立过期需 Redis ≥7.4 HEXPIRE，不做版本耦合）

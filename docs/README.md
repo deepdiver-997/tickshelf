@@ -24,6 +24,7 @@
 | [full-record-benchmark.md](full-record-benchmark.md) | 全记录基准说明：RocksDB 接入、对账、捕获回放 |
 | [pipeline-syscalls.md](pipeline-syscalls.md) | syscall 口径与采集方法 |
 | [real-source-sim.md](real-source-sim.md) | 外部 JSON mock 源的私有 Redis 全链演练 |
+| [iquant-capture.md](iquant-capture.md) | iQuant 实盘快照本机采集：订阅、IQTS 协议、落盘 ACK 与恢复 |
 
 ## 实测证据（带日期，冻结：只追加新日期，不改写旧文件）
 

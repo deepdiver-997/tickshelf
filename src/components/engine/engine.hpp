@@ -49,6 +49,9 @@ public:
     // Successful calls commit input to a record store, not a counting/Null sink.
     // This capability alone makes no power-loss or synchronous=FULL guarantee.
     virtual bool persists_records() const { return true; }
+    // Called only by the owning storage worker when its queue is idle.
+    // Implementations must bound each unit of maintenance and retain retry state.
+    virtual void idle_maintenance() {}
 };
 
 struct EngineConfig {

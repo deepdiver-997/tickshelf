@@ -12,8 +12,8 @@
 // 撕裂尾部（崩溃时未同步的半帧）在 open 时按最后完整帧边界截断。
 //
 // 缺口合同：raw 同步成功、索引提交失败时，水位冻结在本帧起点（连续前缀端），
-// 后续批继续提交但不再推进水位——否则重开时水位会把缺口当已提交跳过，缺口帧
-// 永远不进索引。重开从水位幂等重放 [wm, raw 末尾)，一次补齐缺口与后续帧。
+// 后续批继续提交但不再越过缺口推进水位。worker 空闲时逐帧幂等重放并推进连续
+// 水位；进程中断时重开仍从落盘水位重放，避免跳过未提交帧。
 // 追加失败合同：失败时帧字节可能已部分/全部落盘但不可信，立即截回最后完整帧
 // 边界，保证后续追加仍帧对齐；截不回则毒化分片拒绝后续写。撕裂截断只处理
 // 进程崩溃的产物，不承担"失败后又继续写"的修复。
@@ -55,6 +55,9 @@ public:
     // 内层失败：数据只在 raw 且水位冻结在缺口起点，重开重放幂等补齐。
     std::int64_t upsert_flush(const std::vector<const std::vector<Tick>*>& batches) override;
     bool persists_records() const override { return inner_->persists_records(); }
+    // Replay at most one complete frame when the owning worker is idle.
+    // All calls, including upsert_flush, must be serialized on that worker.
+    void idle_maintenance() override;
 
     std::uint64_t watermark() const { return committed_records_; }  // 索引确认数（连续前缀）
     std::uint64_t raw_records() const { return raw_records_; }      // raw 文件累计数
@@ -75,7 +78,8 @@ private:
     std::uint64_t raw_bytes_ = 0;        // 最后一完整帧的字节末端（追加与截回的帧对齐边界；open 时由扫描校准）
     std::uint64_t raw_records_ = 0;      // raw 文件中的累计 tick 数（追加后即推进）
     std::uint64_t committed_records_ = 0; // 已确认提交到索引的连续前缀长度（水位）
-    bool index_gap_ = false;             // raw 已留痕但索引有缺口：水位冻结至重开重放补齐
+    bool index_gap_ = false;             // raw 已留痕但索引有缺口，需要重放连续前缀
+    std::uint64_t replay_offset_ = 0;    // first frame not yet replayed after a live index failure
     bool poisoned_ = false;              // 追加失败且截不回帧边界：拒绝后续写直至重开
     int raw_fault_times_ = 0;            // 测试注入倒计时
     unsigned commits_since_wm_ = 0;

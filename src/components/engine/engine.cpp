@@ -321,7 +321,13 @@ void Engine::worker_loop(Shard& shard) {
     }
     for (;;) {
         SlicePtr slice;
-        if (!shard.ready.pop_wait(slice)) return;
+        if (!shard.ready.pop_wait_for(slice, std::chrono::milliseconds(100))) {
+            if (shard.ready.closed()) return;
+            if (config_.write_mode == WriteMode::StorageOnly &&
+                !stopping_.load(std::memory_order_acquire))
+                storage_[shard.index]->idle_maintenance();
+            continue;
+        }
         // close() normally drains a queue. Shutdown must not start one potentially
         // blocking adapter call per remaining slice after the drain budget expires.
         if (stopping_.load(std::memory_order_acquire)) return;

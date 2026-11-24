@@ -119,6 +119,28 @@ std::unique_ptr<RawJournalShard> make_shard(const std::filesystem::path& base,
 
 }  // namespace
 
+TEST_CASE("RawJournal: live catch-up retries a failed frame and survives reopen") {
+    Directory dir;
+    SetStorage store;
+    auto shard = make_shard(dir.path / "live", nullptr, &store);
+    auto a = span_ticks(0, 4);
+    auto b = span_ticks(4, 9);
+    store.fail_times = 1;
+    REQUIRE(shard->upsert_flush({&a}) == -1);
+    REQUIRE(shard->upsert_flush({&b}) == 5);
+    CHECK(shard->watermark() == 0);
+    store.fail_times = 1;
+    shard->idle_maintenance();
+    CHECK(shard->watermark() == 0);
+    shard->idle_maintenance();
+    CHECK(shard->watermark() == 4);
+    shard.reset();
+    shard = make_shard(dir.path / "live", nullptr, &store);
+    CHECK(shard->watermark() == 9);
+    CHECK(store.rows.size() == 9);
+    CHECK(shard->recovery_stats().replayed_records == 5);
+}
+
 TEST_CASE("RawJournal: 追加+提交推进 raw/水位，重开零重放") {
     Directory dir;
     const auto base = dir.path / "basic";

@@ -304,6 +304,7 @@ std::int64_t RawJournalShard::upsert_flush(
         if (::ftruncate(raw_fd_, static_cast<off_t>(raw_bytes_)) != 0) poisoned_ = true;
         return -1;
     }
+    const std::uint64_t frame_offset = raw_bytes_;
     raw_bytes_ += frame.size();
     const std::uint64_t seq_end = raw_records_ + total;
     raw_records_ = seq_end;
@@ -313,13 +314,14 @@ std::int64_t RawJournalShard::upsert_flush(
     if (inserted < 0) {
         // 缺口出现：水位冻结在本帧起点（上一个连续完成前缀端）。后续批即使提交
         // 成功也不许推进水位——水位一旦越过缺口，重开时缺口帧会被当已提交跳过，
-        // 永远不进索引。重开从水位幂等重放 [wm, raw 末尾) 一次补齐缺口与后续帧。
+        // 永远不进索引。空闲时或重开时从水位幂等重放缺口与后续帧。
+        if (!index_gap_) replay_offset_ = frame_offset;
         index_gap_ = true;
         return -1;
     }
 
     // 3) 水位推进（内存即时；落盘按间隔摊销）。缺口期间冻结：水位是连续前缀，
-    // 冻结到重开重放补齐为止。
+    // 冻结到空闲或重开重放补齐为止。
     if (!index_gap_) {
         committed_records_ = seq_end;
         if (++commits_since_wm_ >= wm_interval_) {
@@ -328,6 +330,38 @@ std::int64_t RawJournalShard::upsert_flush(
         }
     }
     return inserted;
+}
+
+void RawJournalShard::idle_maintenance() {
+    if (!index_gap_ || poisoned_ || raw_fd_ < 0) return;
+    // The writer and this method share one worker: raw_bytes_ denotes only
+    // complete synced frames, and no append may race this read or the commit.
+    std::uint8_t header[12];
+    const auto offset = static_cast<off_t>(replay_offset_);
+    if (replay_offset_ > raw_bytes_ || raw_bytes_ - replay_offset_ < sizeof(header) ||
+        ::pread(raw_fd_, header, sizeof(header), offset) != static_cast<ssize_t>(sizeof(header)))
+        return;
+    const std::uint32_t count = get_u32le(header);
+    const std::uint64_t first = get_u64le(header + 4);
+    if (!count || count > kMaxRawFrameTicks || first != committed_records_) return;
+    const std::uint64_t bytes = static_cast<std::uint64_t>(count) * kTickBytes;
+    if (bytes > raw_bytes_ - replay_offset_ - sizeof(header)) return;
+    std::vector<std::uint8_t> body(static_cast<std::size_t>(bytes));
+    if (::pread(raw_fd_, body.data(), body.size(), offset + sizeof(header)) !=
+        static_cast<ssize_t>(body.size())) return;
+    std::vector<Tick> ticks(count);
+    for (std::uint32_t i = 0; i < count; ++i)
+        ticks[i] = decode_tick(body.data() + static_cast<std::size_t>(i) * kTickBytes);
+    const std::vector<const std::vector<Tick>*> batch{&ticks};
+    const auto inserted = inner_->upsert_flush(batch);
+    if (inserted < 0) return; // retry the same frame; never advance on failure
+    committed_records_ += count;
+    replay_offset_ += sizeof(header) + bytes;
+    if (++commits_since_wm_ >= wm_interval_ || replay_offset_ == raw_bytes_) {
+        commits_since_wm_ = 0;
+        persist_watermark();
+    }
+    if (replay_offset_ == raw_bytes_) index_gap_ = false;
 }
 
 std::vector<std::unique_ptr<StorageShard>> make_raw_journal_shards(

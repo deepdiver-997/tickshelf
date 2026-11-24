@@ -23,6 +23,17 @@ endif()
 
 find_package(SQLite3 REQUIRED)
 
+add_executable(iquant_engine src/apps/iquant_engine/main.cpp)
+if(TARGET SQLite3::SQLite3)
+  target_link_libraries(iquant_engine PRIVATE SQLite3::SQLite3)
+else()
+  target_link_libraries(iquant_engine PRIVATE SQLite::SQLite3)
+endif()
+option(TICKSHELF_IQUANT_ENGINE_ONLY "Build just the portable IQTS storage worker" OFF)
+if(TICKSHELF_IQUANT_ENGINE_ONLY)
+  return()
+endif()
+
 # 核心库（ADR-009 第一层）：common + libtickshelf 组件。
 # 单元测试直连核心库，不走网络；进程嵌入者链这个库。
 add_library(tickshelf_lib STATIC

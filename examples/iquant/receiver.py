@@ -18,6 +18,7 @@ if not __package__:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from iquant import protocol as wire
+from iquant.engine import ArchiveEngine, HotRange, MAX_GROUP_BYTES, MAX_GROUP_FRAMES, Range
 
 LOG = logging.getLogger(__name__)
 STREAM_NAME = re.compile(r"[0-9a-f]{32}")
@@ -92,17 +93,21 @@ def _recover(path, saved):
             os.fsync(raw.fileno())
     except (OSError, wire.ProtocolError) as exc:
         raise ArchiveError("cannot recover {}: {}".format(path, exc)) from exc
-    return mark
+    return mark, offset
 
 
 class RawArchive:
-    def __init__(self, root, checkpoint_seconds=2.0):
+    def __init__(self, root, checkpoint_seconds=2.0, keep_hot=False):
         if not math.isfinite(checkpoint_seconds) or checkpoint_seconds <= 0:
             raise ValueError("checkpoint interval must be positive and finite")
         self.root = Path(root).expanduser().resolve()
         self.checkpoint_seconds = checkpoint_seconds
         self.progress_path = self.root / "progress.json"
         self.streams = {}
+        self.changed = threading.Condition()
+        self.frontiers = {}
+        self.keep_hot = keep_hot
+        self.last_hot_key = None
         self.current_stream = None
         self._last_checkpoint = float("-inf")
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -114,7 +119,9 @@ class RawArchive:
             saved = self._read_progress()
             for path in self.root.glob("*.raw"):
                 if STREAM_NAME.fullmatch(path.stem):
-                    self.streams[path.stem] = _recover(path, saved.get(path.stem))
+                    mark, end = _recover(path, saved.get(path.stem))
+                    self.streams[path.stem] = mark
+                    self.frontiers[path.stem] = (end, mark.resolved, None)
             if saved.keys() - self.streams.keys():
                 raise ArchiveError("progress refers to a missing raw file")
             _sync_directory(self.root)
@@ -146,6 +153,16 @@ class RawArchive:
     def resume(self, stream_id):
         mark = self.streams.get(stream_id.hex())
         return (mark.data, mark.resolved) if mark is not None else (0, 0)
+
+    def publish_frontier(self, key, start, before, end, last, hot, packets):
+        with self.changed:
+            if self.last_hot_key is not None and self.last_hot_key != key:
+                old_end, old_last, _ = self.frontiers[self.last_hot_key]
+                self.frontiers[self.last_hot_key] = (old_end, old_last, None)
+            recent = HotRange(Range(start, before, end, last), packets) if hot else None
+            self.frontiers[key] = (end, last, recent)
+            self.last_hot_key = key if recent is not None else None
+            self.changed.notify()
 
     def open_stream(self, stream_id):
         key = stream_id.hex()
@@ -319,18 +336,29 @@ class Receiver:
         with self.archive.open_stream(welcome.payload) as stream:
             def commit_and_notify(send_ack):
                 before = stream.mark.resolved
+                start = stream.raw.tell()
+                packets = ()
+                if (self.archive.keep_hot and send_ack and len(stream.pending) <= MAX_GROUP_FRAMES
+                        and stream.pending_bytes <= MAX_GROUP_BYTES):
+                    packets = tuple(record for _, _, _, record in stream.pending)
                 acks = stream.commit()
+                ack_sent = False
                 try:
                     if send_ack and acks:
                         sock.sendall(acks)
+                        ack_sent = True
                 finally:
                     # This is a wakeup hint, not a durable queue. Consumers must
                     # scan the archive on startup and on missed notifications.
-                    if stream.mark.resolved != before and self.on_durable is not None:
-                        try:
-                            self.on_durable(stream.key, stream.mark.resolved)
-                        except Exception:
-                            LOG.exception("durable raw notification failed; consumer must rescan")
+                    if stream.mark.resolved != before:
+                        self.archive.publish_frontier(stream.key, start, before, stream.raw.tell(),
+                                                      stream.mark.resolved, ack_sent and self.archive.keep_hot,
+                                                      packets if ack_sent else ())
+                        if self.on_durable is not None:
+                            try:
+                                self.on_durable(stream.key, stream.mark.resolved)
+                            except Exception:
+                                LOG.exception("durable raw notification failed; consumer must rescan")
 
             def service():
                 if self.stop.is_set():
@@ -370,28 +398,58 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=os.environ.get("TS_IQUANT_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=os.environ.get("TS_IQUANT_PORT", wire.DEFAULT_PORT))
-    parser.add_argument("--output", required=True, help="raw and progress directory (one writer)")
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--output", help="capture-only raw and progress directory")
+    destination.add_argument("--work-dir", help="exclusive iQuant instance directory")
+    parser.add_argument("--engine-bin", help="path to the iquant_engine executable")
+    parser.add_argument("--redis-port", type=int, help="enable hot publication to this loopback Redis port")
+    parser.add_argument("--redis-key", help="hot stream key, defaults to a workspace namespace")
     parser.add_argument("--sync-batches", type=int, default=32)
     parser.add_argument("--sync-bytes", type=int, default=4 * 1024 * 1024)
     parser.add_argument("--sync-ms", type=float, default=10)
     parser.add_argument("--checkpoint-seconds", type=float, default=2)
     parser.add_argument("--retry-seconds", type=float, default=1)
     args = parser.parse_args(argv)
+    if bool(args.work_dir) != bool(args.engine_bin):
+        parser.error("--work-dir and --engine-bin must be used together")
+    if args.redis_port is not None and (not args.work_dir or not 1 <= args.redis_port <= 65535):
+        parser.error("--redis-port requires --work-dir and a valid port")
+    if args.redis_key is not None and (not args.redis_port or not args.redis_key):
+        parser.error("--redis-key requires --redis-port and a nonempty key")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         token = wire.read_token()
-        with RawArchive(args.output, args.checkpoint_seconds) as archive:
-            receiver = Receiver(token, archive, args.host, args.port, args.sync_batches, args.sync_bytes,
-                                args.sync_ms / 1000, args.retry_seconds)
-            try:
-                receiver.run()
-            except KeyboardInterrupt:
-                pass
-            archive.checkpoint(force=True)
-    except (ArchiveError, OSError, ValueError) as exc:
+        if args.work_dir:
+            root = Path(args.work_dir).expanduser().resolve()
+            binary = Path(args.engine_bin).expanduser().resolve(strict=True)
+            if not binary.is_file() or not os.access(str(binary), os.X_OK):
+                raise ValueError("--engine-bin must be an executable file")
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with _lock_output(root / ".instance.lock"):
+                with RawArchive(root / "raw", args.checkpoint_seconds, keep_hot=True) as archive:
+                    engine = ArchiveEngine(archive, str(binary),
+                                           args.redis_port, args.redis_key)
+                    try:
+                        run_receiver(args, archive, token)
+                    finally:
+                        engine.close()
+        else:
+            with RawArchive(args.output, args.checkpoint_seconds) as archive:
+                run_receiver(args, archive, token)
+    except (OSError, RuntimeError, ValueError) as exc:
         LOG.error("IQTS receiver stopped: %s", exc)
         return 1
     return 0
+
+
+def run_receiver(args, archive, token):
+    client = Receiver(token, archive, args.host, args.port, args.sync_batches, args.sync_bytes,
+                      args.sync_ms / 1000, args.retry_seconds)
+    try:
+        client.run()
+    except KeyboardInterrupt:
+        pass
+    archive.checkpoint(force=True)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # iQuant 实盘行情本机采集（IQTS v1）
 
-这条旁路不下单、不走 Redis，也不修改 TickShelf 的 [TTAP 接入口](protocol.md)。iQuant 策略把实时回调快照打成批次，接收器把收到的批次写入本机 `.raw` 文件，同步成功后逐批 ACK。**这里的 raw 是 SDK 回调字段的序列化字节，不是交易所或券商的原始网络包，也不保证每笔成交或委托事件都能从快照复原。**
+这条采集链路和 TickShelf 的 [TTAP 接入口](protocol.md) 各自接收数据。iQuant 策略把实时回调快照打成批次，接收器把收到的批次写入本机 `.raw` 文件，同步成功后逐批 ACK。这里的 raw 保存 SDK 回调字段的序列化字节，快照的事件粒度由来源决定。接收器可同时启动 iQuant 历史库及 Redis 热发布。
 
 ## 启动
 
@@ -24,6 +24,57 @@
    ```powershell
    py -3 .\examples\iquant\receiver.py --output .\market-raw
    ```
+
+## 启动历史库和热发布
+
+在装有 SQLite 开发库的环境构建 iQuant worker。在 Windows 可以使用 CMake 的
+SQLite3 包配置，生成文件的位置由所选生成器决定。
+
+```sh
+cmake -S . -B build-iquant -DTICKSHELF_IQUANT_ENGINE_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-iquant --config Release
+python3 -B examples/iquant/receiver.py --work-dir /path/to/instance-a \
+  --engine-bin ./build-iquant/iquant_engine --redis-port 6379
+```
+
+`--work-dir` 内含 `raw/`、`history.sqlite3` 及 WAL、进度与锁文件。接收器和
+C++ worker 各持有独占锁，强杀接收器后旧 worker 退出前仍会占用自己的锁。
+多实例使用各自的目录与来源端口。配置独立的 Redis 端口和数据目录可以一并隔离
+Redis 文件。省略 `--redis-port` 时只处理历史库。共享 Redis 时各目录默认使用
+不同的 Stream 键，也可显式设置 `--redis-key`。
+
+从已有采集目录迁移时，先停旧接收器，再把整份采集目录复制到新工作目录的
+`raw/` 后启动。已有原文会从历史库的消费游标继续扫，同一来源批次的历史写入
+可以重放。SQLite 使用 `FULL` 同步，在 macOS 上也开启 `fullfsync`。
+
+- 接收端在 raw 同步后发 ACK，随后提交已同步范围的通知。最新的一组可在内存中直接交给解析器。忙时新的通知覆盖上一组，后台始终以已同步的文件范围为准补齐积压。
+- 每轮先处理一组最近数据，再处理一组历史，历史流轮转，每组至多 32 帧和约 4 MiB。历史库故障时接收继续，worker 重试时从库中恢复游标。关注 raw 和数据库的可用盘容量，并用 `raw/progress.json` 的 `resume_watermark` 与 `replay_cursor.last_seq` 比较处理进度。
+- 变长记录 schema 为 `iqts-snapshot/v1`，SQLite 中有对应版本登记。每条保存完整证券代码、可空的 SDK `time` 毫秒值及原样的快照 JSON 字节。整数、小数、数组、空值、非有限数和扩展字段保留在字节中。用 `(stream, batch_seq, ordinal)` 识别一条交付记录，同毫秒的不同交付可以并存。批号以 20 位数字文本保存，覆盖 IQTS 的无符号 64 位范围。
+- `raw_frames` 同时记录原文件偏移、CRC、GAP 和隔离状态。无法解析的整批保留在 raw 中，通过状态 `quarantine` 定位。源端缺失和本地待处理积压可分别对账。记录、帧状态和可推进的连续游标在同一事务提交。实时批可在较早批次追赶前按来源身份先落盘。连续游标等扫过缺口之前的积压才继续前进。
+- 热发布在历史批提交后进入有界队列，积压、Redis 错误或重启可能跳过该次发布。后台补扫直接写历史库。Stream 包含来源流、批号、schema 以及按批内位置编号的证券和快照字段，使用近似 10,000 条 Stream 记录的上限。
+
+本地查询示例。
+
+```sql
+SELECT source_time_ms, CAST(snapshot AS TEXT)
+FROM quotes
+WHERE symbol='IO2712-C-6000.IF'
+  AND source_time_ms BETWEEN 1700000000000 AND 1700001000000
+ORDER BY source_time_ms;
+
+SELECT stream, first_seq, last_seq, status, detail
+FROM raw_frames WHERE status IN ('gap', 'quarantine');
+```
+
+做整目录备份时先停实例并等 worker 退出，再一起复制 raw 和 SQLite，包括
+当时存在的 WAL。恢复到空工作目录后启动实例，游标和帧状态会核验 raw 是否存在。
+仅保留 raw 也可重建历史库。Redis Stream 可以作为独立的短期热数据管理。
+
+运行包含连续强杀和 Redis 堵塞的测试。
+
+```sh
+python3 -B scripts/test_iquant_engine.py --engine-bin build-iquant/iquant_engine
+```
 
 ## 订阅范围与实盘验收
 

@@ -51,13 +51,17 @@ class _Session:
 
 class Sender:
     def __init__(self, token, host="127.0.0.1", port=wire.DEFAULT_PORT, window=128,
-                 buffer_batches=8192, buffer_bytes=64 * 1024 * 1024, handshake_seconds=3.0):
+                 buffer_batches=8192, buffer_bytes=64 * 1024 * 1024, handshake_seconds=3.0,
+                 on_ack=None):
         if not isinstance(token, bytes) or not 1 <= len(token) <= wire.MAX_TOKEN:
             raise ValueError("invalid IQTS token length")
         if min(window, buffer_batches) < 1 or buffer_bytes <= wire.HEADER.size:
             raise ValueError("window and buffer sizes must be positive")
         if handshake_seconds <= 0:
             raise ValueError("handshake timeout must be positive")
+        if on_ack is not None and not callable(on_ack):
+            raise ValueError("on_ack must be callable")
+        self.on_ack = on_ack
         self.token = token
         self.window = window
         self.buffer_batches = buffer_batches
@@ -201,9 +205,15 @@ class Sender:
                 with self._cv:
                     if self._closed or self._active is not session:
                         return
+                    fresh = ack.last > session.window.mark.resolved and ack.first not in session.window.mark.done
                     session.window.ack(ack)
                     self._adopt(session.window.mark)
                     self._cv.notify_all()
+                if fresh and self.on_ack is not None:
+                    try:
+                        self.on_ack(self.stream_id, ack.kind, ack.first, ack.last)
+                    except Exception:
+                        LOG.exception("IQTS ACK callback failed")
         except (OSError, EOFError, wire.ProtocolError) as exc:
             LOG.debug("IQTS session ended: %s", exc)
         finally:

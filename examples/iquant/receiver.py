@@ -280,7 +280,7 @@ class _Superseded(Exception):
 class Receiver:
     def __init__(self, token, archive, host="127.0.0.1", port=wire.DEFAULT_PORT,
                  sync_batches=32, sync_bytes=4 * 1024 * 1024, sync_seconds=0.010,
-                 retry_seconds=1.0, stop=None):
+                 retry_seconds=1.0, stop=None, on_durable=None):
         if not isinstance(token, bytes) or not 1 <= len(token) <= wire.MAX_TOKEN:
             raise ValueError("invalid IQTS token length")
         if min(sync_batches, sync_bytes) < 1:
@@ -295,6 +295,9 @@ class Receiver:
         self.sync_seconds = sync_seconds
         self.retry_seconds = retry_seconds
         self.stop = stop if stop is not None else threading.Event()
+        if on_durable is not None and not callable(on_durable):
+            raise ValueError("on_durable must be callable")
+        self.on_durable = on_durable
         self._owner = uuid.uuid4().bytes
         self._attached_stream = None
 
@@ -314,11 +317,26 @@ class Receiver:
         LOG.info("IQTS connected: stream=%s data=%s resume=%s", welcome.payload.hex(), data, resolved)
         sock.settimeout(min(0.25, self.sync_seconds, self.archive.checkpoint_seconds))
         with self.archive.open_stream(welcome.payload) as stream:
+            def commit_and_notify(send_ack):
+                before = stream.mark.resolved
+                acks = stream.commit()
+                try:
+                    if send_ack and acks:
+                        sock.sendall(acks)
+                finally:
+                    # This is a wakeup hint, not a durable queue. Consumers must
+                    # scan the archive on startup and on missed notifications.
+                    if stream.mark.resolved != before and self.on_durable is not None:
+                        try:
+                            self.on_durable(stream.key, stream.mark.resolved)
+                        except Exception:
+                            LOG.exception("durable raw notification failed; consumer must rescan")
+
             def service():
                 if self.stop.is_set():
                     raise _Stopped()
                 if stream.pending_since is not None and time.monotonic() - stream.pending_since >= self.sync_seconds:
-                    sock.sendall(stream.commit())
+                    commit_and_notify(True)
                 self.archive.checkpoint()
 
             try:
@@ -327,10 +345,10 @@ class Receiver:
                     frame = wire.read_frame(sock, on_timeout=service, kinds=(wire.DATA, wire.GAP))
                     stream.stage(frame)
                     if len(stream.pending) >= self.sync_batches or stream.pending_bytes >= self.sync_bytes:
-                        sock.sendall(stream.commit())
+                        commit_and_notify(True)
             finally:
                 # A valid received batch can still be kept if its connection vanished before ACK.
-                stream.commit()
+                commit_and_notify(False)
 
     def run(self):
         while not self.stop.is_set():

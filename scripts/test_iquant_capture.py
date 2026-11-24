@@ -111,6 +111,16 @@ class ProtocolTests(unittest.TestCase):
 
 
 class SenderTests(unittest.TestCase):
+    def test_ack_callback_receives_valid_ack(self):
+        events = []
+        with Sender(TOKEN, port=0, on_ack=lambda *args: events.append(args)) as sender, tcp(sender) as sock:
+            attach(sock)
+            sender.publish(b"data")
+            frame = wire.read_frame(sock)
+            ack(sock, frame)
+            wait_for(lambda: len(events) == 1)
+            self.assertEqual(events, [(sender.stream_id, wire.ACK_DATA, 1, 1)])
+
     def test_out_of_order_ack_does_not_move_window_or_drop_batches(self):
         with Sender(TOKEN, port=0, window=4) as sender, tcp(sender) as sock:
             self.assertEqual(attach(sock), (sender.stream_id, wire.READY))
@@ -194,6 +204,19 @@ class SenderTests(unittest.TestCase):
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_durable_callback_is_a_hint_after_raw_sync(self):
+        with tempfile.TemporaryDirectory() as tmp, Sender(TOKEN, port=0) as sender:
+            seen = []
+            def notified(key, resolved):
+                records = raw_records(Path(tmp) / (key + ".raw"))
+                seen.append((key, resolved, records[-1].payload))
+            with receiver.RawArchive(tmp) as archive:
+                with running(new_receiver(sender, archive, sync_batches=1, on_durable=notified)):
+                    sender.publish(b"raw")
+                    wait_for(lambda: len(seen) == 1)
+                    wait_for(lambda: sender.stats()["data_watermark"] == 1)
+                self.assertEqual(seen, [(sender.stream_id.hex(), 1, b"raw")])
+
     def test_ack_loss_resume_uses_synced_raw_not_stale_progress(self):
         with tempfile.TemporaryDirectory() as tmp, Sender(TOKEN, port=0) as sender:
             stream_id = sender.stream_id

@@ -2,6 +2,10 @@
 // SQLite 落库（ADR-005：UNIQUE + INSERT OR IGNORE 即幂等）。
 // 唯一自然键 (symbol, ts_exchange_ms) —— 重复 upsert 不产生第二行，这是
 // "at-least-once + 幂等 = 效果上 exactly-once" 的收敛点。
+// 行身份与冲突规则（delivery-contract §4.2）：同键 = 同一行情身份；同事件重投
+// （字节级相同）幂等收敛并计 exact_duplicates；同键异内容 first-accepted-wins，
+// 后到内容丢弃并计 content_conflicts——被唯一键吃掉绝不能是静默的。
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -10,6 +14,7 @@
 #include "tick_store.hpp"
 
 struct sqlite3;
+struct sqlite3_stmt;
 
 namespace tickshelf {
 
@@ -28,6 +33,13 @@ struct SqliteConnectionInfo {
     int wal_autocheckpoint = -1;
 };
 
+// 行身份判定快照（值语义）。计数器本体是 relaxed 原子：分片写线程递增，
+// 统计读取线程（ShardedTickStore 聚合、守护进程 10s 打点）并发取值。
+struct SqliteIdentityStats {
+    std::uint64_t exact_duplicates = 0;   // 同事件重投：字节级相同，幂等收敛（良性）
+    std::uint64_t content_conflicts = 0;  // 同键异内容：first-accepted-wins 丢弃后者
+};
+
 class SqliteTickStore : public TickStore {
 public:
     SqliteTickStore() = default;
@@ -41,6 +53,12 @@ public:
     // 此生产路径未显式设置 synchronous；不能假定为 FULL，实际值用 connection_info 回读。
     bool open(const std::string& path) override;
     bool connection_info(SqliteConnectionInfo& out) const;
+
+    // 行身份计数快照（见 SqliteIdentityStats 与 delivery-contract §4.2）。
+    SqliteIdentityStats identity_stats() const {
+        return SqliteIdentityStats{exact_duplicates_.load(std::memory_order_relaxed),
+                                   content_conflicts_.load(std::memory_order_relaxed)};
+    }
 
     // 批量幂等 upsert（单事务）。返回新插入行数（被唯一键忽略的不计）；-1 = SQLite 故障。
     std::int64_t upsert_batch(const std::vector<Tick>& ticks) override;
@@ -60,8 +78,13 @@ public:
     std::uint64_t count() const override;
 
 private:
+    // 唯一键拒绝的分类计数（比对逻辑见定义处注释）。
+    void count_rejected(sqlite3_stmt* cmp, const std::string& sym, const Tick& t);
+
     sqlite3* db_ = nullptr;
     mutable bool query_failed_ = false;
+    std::atomic<std::uint64_t> exact_duplicates_{0};
+    std::atomic<std::uint64_t> content_conflicts_{0};
 };
 
 }  // namespace tickshelf

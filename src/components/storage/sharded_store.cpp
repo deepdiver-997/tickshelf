@@ -113,6 +113,16 @@ std::uint64_t ShardedTickStore::count() const {
     return n;
 }
 
+SqliteIdentityStats ShardedTickStore::identity_stats() const {
+    SqliteIdentityStats out;
+    for (const auto& s : shards_) {
+        const auto st = s->store.identity_stats();
+        out.exact_duplicates += st.exact_duplicates;
+        out.content_conflicts += st.content_conflicts;
+    }
+    return out;
+}
+
 std::unique_ptr<TickStore> make_tick_store(int shards) {
     if (shards > 1) {
         auto s = std::make_unique<ShardedTickStore>();

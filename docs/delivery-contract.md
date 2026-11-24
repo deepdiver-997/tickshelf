@@ -112,6 +112,61 @@ Watermark loss only costs replay work. Raw replay is a single-machine recovery
 mechanism for the storage-only path; write-through keeps the Redis lease as its
 recovery authority and does not stack this journal.
 
+Enforcement of that watermark bound is structural, not aspirational:
+
+- **Index commit failure opens a gap.** The watermark freezes at the failed
+  frame's `seq_first` (the end of the last contiguous committed prefix).
+  Subsequent batches keep committing and keep appending to raw, but the
+  watermark does not advance across the gap; the next open replays
+  `[watermark, raw end)` idempotently, closing the gap and the later frames in
+  one pass. A watermark that jumped the gap would make recovery skip the
+  un-committed frames forever — that ordering ("fail, then keep writing, then
+  reopen") is regression-tested.
+- **Raw append/sync failure truncates back.** Frame bytes may have partially or
+  fully landed without being confirmed durable; they are `ftruncate`d back to
+  the last complete frame boundary immediately, so later appends stay
+  frame-aligned. If the truncate itself fails, the shard poisons itself and
+  rejects further writes until reopen. Relying on the open-time torn-tail
+  truncation instead would let a later successful frame land after the torn
+  one and be cut off together with it.
+- **Scan validates the chain.** Frame `seq_first` must equal the previous
+  complete frame's end; a discontinuity is structural damage, truncated at the
+  last complete frame. The watermark is clamped to the last frame actually
+  present in the file.
+
+### 4.2 Service SQLite record identity and conflict rule
+
+The service path's logical record identity is the storage primary key
+`(symbol, ts_exchange_ms)` (ADR-005). One identity holds **one row**, and the
+conflict rule is **first-accepted-wins**: `INSERT OR IGNORE` keeps the row that
+arrived first; later content under the same key is dropped. This is a snapshot
+per identity, not per-event history. A source that legitimately emits multiple
+distinct events under one `(symbol, ts_exchange_ms)` is not representable in
+this schema; carrying a source-stable event id into the key (per-event
+history) is an ADR-018 format-version change and is explicitly out of scope
+until such a source is actually wired in.
+
+A rejected insert is never silent. On a unique-key rejection the stored row is
+read back and compared against the incoming record, and one of two counters
+increments (`SqliteTickStore::identity_stats`, aggregated by
+`ShardedTickStore::identity_stats`, printed by `tickshelfd` as
+`identity_dup`/`identity_conflict`):
+
+- `exact_duplicates` — every stored field equals the incoming record. This is
+  an at-least-once re-delivery converging (the "effectively exactly-once"
+  storage effect of §3). Benign.
+- `content_conflicts` — same key, different content. This is dropped data
+  under the first-accepted-wins rule and a loss signal worth investigating: it
+  should stay at zero for sources that emit one snapshot per identity, and its
+  growth rate is the honest rate at which this schema cannot represent the
+  feed.
+
+The three judgement datasets — same key different content, same-event
+re-delivery, out-of-order arrival — are regression-tested end to end from the
+ingest API to `query_range` results (`tests/test_identity.cpp`): first wins
+and is queryable, re-delivery converges to one row, distinct keys are all
+stored and served in `ts_exchange_ms` order.
+
 ## 5. Fault policy is not the healthy benchmark PASS rule
 
 A healthy/no-injected-fault benchmark still requires independently reconciled

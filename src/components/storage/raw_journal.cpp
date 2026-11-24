@@ -157,6 +157,7 @@ bool RawJournalShard::scan_and_replay(std::string* error) {
     const off_t file_size = st.st_size;
     off_t offset = static_cast<off_t>(kRawMagicBytes);
     off_t last_good_end = offset;
+    std::uint64_t last_frame_records = 0;  // 最后完整帧的 seq 末端（追加链的连续边界）
     std::vector<const std::vector<Tick>*> replay_batch;  // 单帧指针容器
     bool scan_ok = true;
 
@@ -172,6 +173,12 @@ bool RawJournalShard::scan_and_replay(std::string* error) {
             scan_ok = false;  // 结构损坏：不可安全跳过
             break;
         }
+        // seq 必须与前一完整帧首尾相接：追加链只由本类维护，出现断链即结构损坏
+        // （外部破坏或历史缺陷数据），截断到上一帧为止，不可安全跳过。
+        if (seq_first != last_frame_records) {
+            scan_ok = false;
+            break;
+        }
         const off_t body_bytes = static_cast<off_t>(count) * static_cast<off_t>(kTickBytes);
         if (offset + static_cast<off_t>(sizeof(header)) + body_bytes > file_size) {
             scan_ok = false;  // 撕裂帧体：崩溃时未同步完成的尾帧
@@ -182,6 +189,7 @@ bool RawJournalShard::scan_and_replay(std::string* error) {
         if (seq_first + count <= committed_records_) {
             offset += static_cast<off_t>(sizeof(header)) + body_bytes;
             last_good_end = offset;
+            last_frame_records = seq_first + count;
             continue;
         }
 
@@ -217,6 +225,7 @@ bool RawJournalShard::scan_and_replay(std::string* error) {
         }
         committed_records_ = seq_first + count;
         last_good_end = offset;
+        last_frame_records = seq_first + count;
     }
     ::close(scan_fd);
 
@@ -229,11 +238,14 @@ bool RawJournalShard::scan_and_replay(std::string* error) {
         recovery_.torn_tail_bytes = static_cast<std::uint64_t>(file_size - last_good_end);
     }
 
-    // raw 中最后确认边界之后可能还有"水位以内"的帧 —— raw_records_ 必须等于
-    // 实际文件内容（截断后的 last_good_end），而不是虚高的 committed_records_。
-    raw_records_ = committed_records_;
-    // committed_records_ 被 scan 推进到了最后完整帧；水位语义要求它 ≤ raw_records_。
-    // 重放已把 [old_wm, end) 全部提交进索引，因此两者一致。
+    // 字节偏移校准到实际文件内容：后续追加与同步失败截回都以它为帧对齐边界。
+    raw_bytes_ = static_cast<std::uint64_t>(last_good_end);
+    // raw_records_ 以文件实际内容为准（最后完整帧的 seq 末端），不是虚高的水位；
+    // 水位若越过它（wm 文件陈旧或被外部抬高），钳回——宁可后续多重放，不可让
+    // 追加从错误的 seq 起写把恢复链路写断。注意：被钳掉的水位之下若真有未提交
+    // 帧，跳过决策已按虚高水位做出，属 wm 外部损坏，本类自身不产生这种水位。
+    if (committed_records_ > last_frame_records) committed_records_ = last_frame_records;
+    raw_records_ = last_frame_records;
     return true;
 }
 
@@ -259,7 +271,7 @@ void RawJournalShard::persist_watermark() {
 
 std::int64_t RawJournalShard::upsert_flush(
     const std::vector<const std::vector<Tick>*>& batches) {
-    if (raw_fd_ < 0) return -1;
+    if (raw_fd_ < 0 || poisoned_) return -1;
     std::uint64_t total = 0;
     for (const auto* batch : batches) total += batch->size();
     if (total == 0) return 0;
@@ -277,24 +289,43 @@ std::int64_t RawJournalShard::upsert_flush(
         frame.append(reinterpret_cast<const char*>(encoded), kTickBytes);
     }
     std::string append_error;
-    if (!write_all(raw_fd_, frame.data(), frame.size(), &append_error) ||
-        !durably_sync(raw_fd_)) {
-        // 追加/同步失败：raw 内容不可信（可能半帧），索引绝不提交。
-        // 半帧留在文件尾，下次 open 的撕裂截断会处理；Engine 记 degraded。
+    bool append_ok = write_all(raw_fd_, frame.data(), frame.size(), &append_error);
+    if (append_ok && raw_fault_times_ > 0) {
+        --raw_fault_times_;  // 测试注入：帧字节已写入但按同步失败处理（不可信）
+        append_ok = false;
+    }
+    if (append_ok) append_ok = durably_sync(raw_fd_);
+    if (!append_ok) {
+        // 追加/同步失败：帧字节可能已部分/全部落在文件里但不可信，索引绝不提交。
+        // 立即截回最后完整帧边界，让后续追加仍落在帧对齐位置——否则下一帧会追加
+        // 在半帧之后，重开时撕裂截断会把已成功提交的帧连同截掉，追加 seq 链断裂。
+        // 截不回去（EIO 等）则毒化分片拒绝后续写，撕裂留给 open 扫描处理；
+        // Engine 记 degraded。
+        if (::ftruncate(raw_fd_, static_cast<off_t>(raw_bytes_)) != 0) poisoned_ = true;
         return -1;
     }
+    raw_bytes_ += frame.size();
     const std::uint64_t seq_end = raw_records_ + total;
     raw_records_ = seq_end;
 
-    // 2) 索引提交。失败 → raw 已有数据，重放补齐；Engine 记 degraded。
+    // 2) 索引提交。失败 → 数据只在 raw，重放补齐；Engine 记 degraded。
     const std::int64_t inserted = inner_->upsert_flush(batches);
-    if (inserted < 0) return -1;
+    if (inserted < 0) {
+        // 缺口出现：水位冻结在本帧起点（上一个连续完成前缀端）。后续批即使提交
+        // 成功也不许推进水位——水位一旦越过缺口，重开时缺口帧会被当已提交跳过，
+        // 永远不进索引。重开从水位幂等重放 [wm, raw 末尾) 一次补齐缺口与后续帧。
+        index_gap_ = true;
+        return -1;
+    }
 
-    // 3) 水位推进（内存即时；落盘按间隔摊销）。
-    committed_records_ = seq_end;
-    if (++commits_since_wm_ >= wm_interval_) {
-        commits_since_wm_ = 0;
-        persist_watermark();
+    // 3) 水位推进（内存即时；落盘按间隔摊销）。缺口期间冻结：水位是连续前缀，
+    // 冻结到重开重放补齐为止。
+    if (!index_gap_) {
+        committed_records_ = seq_end;
+        if (++commits_since_wm_ >= wm_interval_) {
+            commits_since_wm_ = 0;
+            persist_watermark();
+        }
     }
     return inserted;
 }

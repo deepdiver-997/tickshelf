@@ -21,6 +21,9 @@ public:
     explicit SqliteStorageShard(std::unique_ptr<SqliteTickStore> store);
     std::int64_t upsert_flush(const std::vector<const std::vector<Tick>*>& batches) override;
 
+    // 行身份计数透传（delivery-contract §4.2）；装饰器（RawJournalShard）之下仍可取。
+    SqliteIdentityStats identity_stats() const { return store_->identity_stats(); }
+
 private:
     std::unique_ptr<SqliteTickStore> store_;
 };

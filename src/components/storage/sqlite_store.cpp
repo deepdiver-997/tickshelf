@@ -114,6 +114,36 @@ bool SqliteTickStore::connection_info(SqliteConnectionInfo& out) const {
     return true;
 }
 
+void SqliteTickStore::count_rejected(sqlite3_stmt* cmp, const std::string& sym, const Tick& t) {
+    // 唯一键拒绝分两类，合同上必须区分（delivery-contract §4.2）：
+    //   同事件重投（全部字段相同）→ 幂等收敛，exact_duplicates（良性）；
+    //   同键异内容 → first-accepted-wins 丢弃后到内容，content_conflicts（数据损失信号）。
+    // IGNORE 只因主键冲突触发、行必存在；查不到行按冲突计——防御性取向：可见优于静默。
+    bool conflict = true;
+    if (sqlite3_bind_text(cmp, 1, sym.data(), static_cast<int>(sym.size()), SQLITE_TRANSIENT) ==
+            SQLITE_OK &&
+        sqlite3_bind_int64(cmp, 2, static_cast<sqlite3_int64>(t.ts_exchange_ms)) == SQLITE_OK &&
+        sqlite3_step(cmp) == SQLITE_ROW) {
+        conflict = sqlite3_column_int64(cmp, 0) != static_cast<sqlite3_int64>(t.ts_receive_ms) ||
+                   sqlite3_column_int64(cmp, 1) != t.bid_price ||
+                   sqlite3_column_int64(cmp, 2) != t.ask_price ||
+                   sqlite3_column_int64(cmp, 3) != t.last_price ||
+                   sqlite3_column_int64(cmp, 4) !=
+                       static_cast<sqlite3_int64>(t.bid_size) ||
+                   sqlite3_column_int64(cmp, 5) !=
+                       static_cast<sqlite3_int64>(t.ask_size) ||
+                   sqlite3_column_int64(cmp, 6) !=
+                       static_cast<sqlite3_int64>(t.last_size) ||
+                   sqlite3_column_int64(cmp, 7) != static_cast<sqlite3_int64>(t.flags);
+    }
+    sqlite3_reset(cmp);
+    sqlite3_clear_bindings(cmp);
+    if (conflict)
+        content_conflicts_.fetch_add(1, std::memory_order_relaxed);
+    else
+        exact_duplicates_.fetch_add(1, std::memory_order_relaxed);
+}
+
 std::int64_t SqliteTickStore::upsert_flush(const std::vector<const std::vector<Tick>*>& batches) {
     if (db_ == nullptr) return -1;
     std::size_t total = 0;
@@ -121,10 +151,21 @@ std::int64_t SqliteTickStore::upsert_flush(const std::vector<const std::vector<T
     if (total == 0) return 0;
     constexpr const char* kInsert =
         "INSERT OR IGNORE INTO ticks VALUES(?,?,?,?,?,?,?,?,?,?)";
+    // 唯一键拒绝时的回读比对：只按主键取行（覆盖绝大多数 flush 零次调用）。
+    constexpr const char* kCompare =
+        "SELECT ts_receive_ms, bid_price, ask_price, last_price, bid_size, ask_size,"
+        " last_size, flags FROM ticks WHERE symbol=?1 AND ts_exchange_ms=?2";
     sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db_, kInsert, -1, &stmt, nullptr) != SQLITE_OK) return -1;
+    sqlite3_stmt* cmp = nullptr;
+    if (sqlite3_prepare_v2(db_, kInsert, -1, &stmt, nullptr) != SQLITE_OK ||
+        sqlite3_prepare_v2(db_, kCompare, -1, &cmp, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        sqlite3_finalize(cmp);
+        return -1;
+    }
     if (sqlite3_exec(db_, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) {
         sqlite3_finalize(stmt);
+        sqlite3_finalize(cmp);
         return -1;  // busy_timeout 3s 后仍拿不到写锁
     }
 
@@ -145,9 +186,13 @@ std::int64_t SqliteTickStore::upsert_flush(const std::vector<const std::vector<T
             if (sqlite3_step(stmt) != SQLITE_DONE) {
                 sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
                 sqlite3_finalize(stmt);
+                sqlite3_finalize(cmp);
                 return -1;
             }
-            inserted += sqlite3_changes(db_);
+            if (sqlite3_changes(db_) == 0)
+                count_rejected(cmp, sym, t);  // 被唯一键吃掉：区分重投与冲突
+            else
+                ++inserted;
             sqlite3_reset(stmt);
             sqlite3_clear_bindings(stmt);
         }
@@ -155,9 +200,11 @@ std::int64_t SqliteTickStore::upsert_flush(const std::vector<const std::vector<T
     if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
         sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
         sqlite3_finalize(stmt);
+        sqlite3_finalize(cmp);
         return -1;
     }
     sqlite3_finalize(stmt);
+    sqlite3_finalize(cmp);
     return inserted;
 }
 

@@ -46,6 +46,10 @@ public:
     bool query_failed() const override { return query_failed_; }
     std::uint64_t count() const override;
 
+    // 行身份计数跨分片聚合（delivery-contract §4.2）。路由是纯函数：同一 symbol
+    // 永远落同一分片，同键冲突必然被同一分片看见，聚合不会重复计。
+    SqliteIdentityStats identity_stats() const;
+
 private:
     // 分片 = 文件 + 独占写线程 + 有界作业队列（完整类型放头文件：vector<unique_ptr<Shard>>
     // 作为成员，隐式析构在含本头的 TU 里实例化时需要 Shard 完整）。

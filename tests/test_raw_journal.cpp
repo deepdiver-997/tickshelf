@@ -34,11 +34,14 @@ struct Directory {
 };
 
 // 计数型假存储：按 64B 内容去重的集合（模拟存储唯一键幂等）。
-// fail_times > 0 时下一次提交返回 -1（模拟 SQLite 故障）。
+// succeed_first > 0 时先放行 N 次成功调用，随后 fail_times > 0 的下一次提交
+// 返回 -1（模拟 SQLite 故障，可精确落在第 N+1 批上）。
 class SetStorage final : public StorageShard {
 public:
     std::int64_t upsert_flush(const std::vector<const std::vector<Tick>*>& batches) override {
-        if (fail_times > 0) {
+        if (succeed_first > 0) {
+            --succeed_first;
+        } else if (fail_times > 0) {
             --fail_times;
             return -1;
         }
@@ -57,6 +60,7 @@ public:
     bool persists_records() const override { return persistent; }
 
     bool persistent = true;
+    int succeed_first = 0;
     int fail_times = 0;
     std::uint64_t calls = 0;
     std::set<std::string> rows;
@@ -162,6 +166,77 @@ TEST_CASE("RawJournal: 内层提交失败——raw 已留痕，重开重放补�
     CHECK(third->recovery_stats().replayed_records == 0);
     CHECK(again_rows->rows.size() == 4);
     CHECK(again_rows == recovered_rows);
+}
+
+TEST_CASE("RawJournal: 索引失败后继续写——水位冻结在缺口起点，重开重放补齐") {
+    Directory dir;
+    const auto base = dir.path / "gap";
+    SetStorage* rows = nullptr;
+    auto shard = make_shard(base, &rows, nullptr, /*fail_times=*/1);
+    rows->succeed_first = 1;  // 让 W 先成功，故障恰好落在 A（第二次提交）上
+    const std::vector<Tick> w = span_ticks(0, 2);
+    REQUIRE(shard->upsert_flush({&w}) == 2);    // 缺口前的连续前缀
+    CHECK(shard->watermark() == 2);
+
+    // 失败顺序：A 索引失败（raw 已留痕）→ B 紧接着提交成功。
+    const std::vector<Tick> a = span_ticks(2, 6);
+    CHECK(shard->upsert_flush({&a}) < 0);       // raw 4 条留痕，索引失败 → 缺口
+    CHECK(shard->raw_records() == 6);
+    CHECK(shard->watermark() == 2);             // 冻结在缺口起点（A 的 seq_first）
+    const std::vector<Tick> b = span_ticks(6, 11);
+    REQUIRE(shard->upsert_flush({&b}) == 5);    // 失败后继续写成功
+    CHECK(shard->raw_records() == 11);
+    CHECK(shard->watermark() == 2);             // 不许跳过缺口推进到 11
+    CHECK(rows->rows.size() == 7);              // 索引只有 W∪B，缺 A
+
+    // 重开：从水位幂等重放 A∪B，按内容查齐；再重开零重放无重复。
+    SetStorage* recovered_rows = nullptr;
+    auto reopened = make_shard(base, &recovered_rows, rows);
+    CHECK(reopened->recovery_stats().replayed_records == 9);   // A 的 4 + B 的 5
+    CHECK(reopened->recovery_stats().replayed_inserted == 4);  // 只 A 新增，B 幂等忽略
+    CHECK(recovered_rows->rows.size() == 11);
+    CHECK(reopened->watermark() == 11);
+    CHECK(reopened->raw_records() == 11);
+
+    SetStorage* again_rows = nullptr;
+    auto third = make_shard(base, &again_rows, recovered_rows);
+    CHECK(third->recovery_stats().replayed_records == 0);
+    CHECK(again_rows->rows.size() == 11);
+}
+
+TEST_CASE("RawJournal: raw 同步失败后继续写——截回帧边界，重开扫描自洽") {
+    Directory dir;
+    const auto base = dir.path / "rawfail";
+    SetStorage* rows = nullptr;
+    auto shard = make_shard(base, &rows);
+    const std::vector<Tick> a = span_ticks(0, 4);
+    shard->inject_raw_sync_fault(1);
+    CHECK(shard->upsert_flush({&a}) < 0);       // 帧字节已写入但按同步失败处理 → 截回
+    CHECK(shard->raw_records() == 0);
+    CHECK(shard->watermark() == 0);
+
+    // 失败后继续写：必须落在截回后的帧对齐位置（而不是半帧之后）。
+    const std::vector<Tick> b = span_ticks(0, 5);  // seq 仍从 0 起：失败批未占号
+    REQUIRE(shard->upsert_flush({&b}) == 5);
+    CHECK(shard->raw_records() == 5);
+    const auto fsize = std::filesystem::file_size(base.string() + ".raw");
+    CHECK(fsize == (sizeof("TICKSHELF-RAW-JOURNAL v1\n") - 1) + 12 + 5 * kTickBytes);
+
+    // 拨回水位强制重放：验证截回后重写的帧内容完整可扫、无撕裂尾被截。
+    {
+        FILE* f = std::fopen((base.string() + ".raw.wm").c_str(), "w");
+        REQUIRE(f != nullptr);
+        std::fputs("0\n", f);
+        std::fclose(f);
+    }
+    SetStorage* recovered_rows = nullptr;
+    auto reopened = make_shard(base, &recovered_rows);
+    CHECK(reopened->recovery_stats().torn_tail_bytes == 0);
+    CHECK(reopened->recovery_stats().replayed_records == 5);
+    CHECK(reopened->recovery_stats().replayed_inserted == 5);
+    CHECK(recovered_rows->rows.size() == 5);
+    CHECK(reopened->raw_records() == 5);
+    CHECK(reopened->watermark() == 5);
 }
 
 TEST_CASE("RawJournal: 水位落后时重放幂等，不产生重复行") {

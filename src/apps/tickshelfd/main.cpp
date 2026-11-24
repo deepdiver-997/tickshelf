@@ -311,6 +311,10 @@ private:
                              opt_.db.c_str(), cfg.shards);
                 return false;
             }
+            // 非拥有指针：identity 计数聚合用（RawJournalShard 装饰后基类指针取不到）。
+            for (const auto& s : storage_shards)
+                if (auto* p = dynamic_cast<tickshelf::SqliteStorageShard*>(s.get()))
+                    sqlite_shards_.push_back(p);
             if (opt_.raw_journal) {
                 // ADR-027：本体先于索引；open 内完成水位之后帧的重放（幂等 upsert）。
                 std::vector<tickshelf::RawJournalShard::RecoveryStats> replay;
@@ -527,12 +531,19 @@ private:
     void print_stats() {
         if (engine_) {
             const auto es = engine_->stats();
+            tickshelf::SqliteIdentityStats identity;  // 行身份计数（contract §4.2）
+            for (const auto* p : sqlite_shards_) {
+                const auto st = p->identity_stats();
+                identity.exact_duplicates += st.exact_duplicates;
+                identity.content_conflicts += st.content_conflicts;
+            }
             std::fprintf(stderr,
                          "tickshelfd: engine ingested=%llu submitted=%llu accepted=%llu "
                          "rejected=%llu dedup=%llu durable=%llu publish=%llu skipped=%llu "
                          "degraded=%llu pending=%llu retries=%llu finish_pending=%llu "
                          "queue=%llu/%llu retry_buf=%zu frames=%llu crc_err=%llu resync=%llu "
-                         "conns=%zu published=%llu committed_input=%llu inserted_unique=%llu sink_consumed=%llu\n",
+                         "conns=%zu published=%llu committed_input=%llu inserted_unique=%llu "
+                         "sink_consumed=%llu identity_dup=%llu identity_conflict=%llu\n",
                          static_cast<unsigned long long>(stats_.ticks_ingested),
                          static_cast<unsigned long long>(es.submitted_records),
                          static_cast<unsigned long long>(es.accepted_records),
@@ -553,7 +564,9 @@ private:
                          static_cast<unsigned long long>(es.published_records),
                          static_cast<unsigned long long>(es.committed_input_records),
                          static_cast<unsigned long long>(es.inserted_unique_records),
-                         static_cast<unsigned long long>(es.sink_consumed_records));
+                         static_cast<unsigned long long>(es.sink_consumed_records),
+                         static_cast<unsigned long long>(identity.exact_duplicates),
+                         static_cast<unsigned long long>(identity.content_conflicts));
             return;
         }
         const char* stall = "";
@@ -565,9 +578,16 @@ private:
                           static_cast<unsigned long long>(stats_.stall_max_ms));
             stall = stall_buf;
         }
+        tickshelf::SqliteIdentityStats identity;
+        if (auto* sharded = dynamic_cast<tickshelf::ShardedTickStore*>(store_.get())) {
+            identity = sharded->identity_stats();
+        } else if (auto* single = dynamic_cast<tickshelf::SqliteTickStore*>(store_.get())) {
+            identity = single->identity_stats();
+        }
         std::fprintf(stderr,
                      "tickshelfd: ingested=%llu pending=%llu flushes=%llu flush_err=%llu "
-                     "frames=%llu crc_err=%llu resync=%llu conns=%zu rows=%llu%s\n",
+                     "frames=%llu crc_err=%llu resync=%llu conns=%zu rows=%llu "
+                     "identity_dup=%llu identity_conflict=%llu%s\n",
                      static_cast<unsigned long long>(stats_.ticks_ingested),
                      static_cast<unsigned long long>(ingestor_.pending_ticks()),
                      static_cast<unsigned long long>(stats_.flushes_ok),
@@ -575,7 +595,9 @@ private:
                      static_cast<unsigned long long>(stats_.frames_ok),
                      static_cast<unsigned long long>(stats_.crc_errors),
                      static_cast<unsigned long long>(stats_.resync_events), sessions_.size(),
-                     static_cast<unsigned long long>(stats_.rows_upserted), stall);
+                     static_cast<unsigned long long>(stats_.rows_upserted),
+                     static_cast<unsigned long long>(identity.exact_duplicates),
+                     static_cast<unsigned long long>(identity.content_conflicts), stall);
     }
 
     Options opt_;
@@ -585,6 +607,7 @@ private:
     tickshelf::RespClient rc_;
     std::unique_ptr<tickshelf::TickStore> store_;  // N=1 单文件 / N>1 分片（ADR-020）
     std::unique_ptr<tickshelf::Engine> engine_;    // --engine on 时替代旧 flush 路径
+    std::vector<tickshelf::SqliteStorageShard*> sqlite_shards_;  // 非拥有：引擎路径身份计数聚合
     std::vector<tickshelf::Tick> retry_ticks_;     // Engine 背压留下的未接收尾部
     bool engine_storage_only_ = false;  // Engine StorageOnly：无 Redis，跳过负载发布
     bool engine_durable_mode_ = false;  // WriteThrough/StorageOnly：退出时检查 storage_complete

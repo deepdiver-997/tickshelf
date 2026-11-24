@@ -126,6 +126,7 @@ if(TICKSHELF_BUILD_TESTS)
     tests/test_sharded_store.cpp
     tests/test_shard_route.cpp
     tests/test_raw_journal.cpp
+    tests/test_identity.cpp
     tests/test_bounded_queue.cpp
     tests/test_engine_dedupe.cpp
     tests/test_engine.cpp

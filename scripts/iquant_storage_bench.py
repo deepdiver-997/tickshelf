@@ -1,0 +1,175 @@
+"""Compare local SQLite, Parquet and embedded ClickHouse on the same IQTS-shaped records."""
+
+import argparse
+import csv
+import json
+import os
+from pathlib import Path
+import sqlite3
+import statistics
+import sys
+import time
+
+
+FIELDS = "symbol, source_time_ms, batch_seq, ordinal, snapshot"
+FILTER = "symbol='600042.SH' AND source_time_ms BETWEEN 1700000000000 AND 1700001000000"
+
+
+def generate(path, count):
+    expected = [0, 0]
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.writer(file)
+        for i in range(count):
+            symbol = "{:06}.SH".format(600000 + i % 1000)
+            timestamp = 1700000000000 + (i // 1000) * 1000
+            price = 10 + (i % 113) * 0.001
+            snapshot = json.dumps({"time": timestamp, "lastPrice": round(price, 3),
+                                   "askPrice": [round(price + j * 0.001, 3) for j in range(1, 6)],
+                                   "bidVol": [100 * ((i + j) % 197) for j in range(5)],
+                                   "openInt": None if i % 3 else i % 8192}, separators=(",", ":"))
+            writer.writerow((symbol, timestamp, "{:020}".format(1 + i // 256), i % 256, snapshot))
+            if i % 1000 == 42 and timestamp <= 1700001000000:
+                expected[0] += 1
+                expected[1] += len(snapshot)
+    return tuple(expected)
+
+
+def timed_query(query, expected):
+    times = []
+    for _ in range(31):
+        start = time.perf_counter()
+        observed = tuple(query())
+        times.append((time.perf_counter() - start) * 1000)
+        if observed != expected:
+            raise RuntimeError("range audit failed: {} vs {}".format(observed, expected))
+    return {"range_first_ms": times[0], "range_warm_p50_ms": statistics.median(times[1:])}
+
+
+def q(path):
+    return "'" + str(path).replace("'", "''") + "'"
+
+
+def sync(path):
+    flags = os.O_RDONLY
+    if path.is_dir() and hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(str(path), flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def measure_sqlite(root, source, expected, count):
+    output = root / "history.sqlite3"
+    with sqlite3.connect(output) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=FULL")
+        if sys.platform == "darwin":
+            db.execute("PRAGMA fullfsync=ON")
+        db.execute("CREATE TABLE quotes(symbol TEXT, source_time_ms INTEGER, batch_seq TEXT, ordinal INTEGER, "
+                   "snapshot BLOB, PRIMARY KEY(batch_seq,ordinal)) WITHOUT ROWID")
+        db.execute("CREATE INDEX quote_range ON quotes(symbol,source_time_ms)")
+        start = time.perf_counter()
+        with source.open(encoding="utf-8", newline="") as file:
+            batch = []
+            for symbol, timestamp, seq, ordinal, snapshot in csv.reader(file):
+                batch.append((symbol, int(timestamp), seq, int(ordinal), snapshot.encode("utf-8")))
+                if len(batch) == 8192:
+                    db.executemany("INSERT INTO quotes VALUES(?,?,?,?,?)", batch)
+                    db.commit()
+                    batch.clear()
+            if batch:
+                db.executemany("INSERT INTO quotes VALUES(?,?,?,?,?)", batch)
+                db.commit()
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        elapsed = time.perf_counter() - start
+        if db.execute("SELECT count(*) FROM quotes").fetchone() != (count,):
+            raise RuntimeError("SQLite row count mismatch")
+        result = timed_query(lambda: db.execute("SELECT count(*), sum(length(snapshot)) FROM quotes WHERE " +
+                                               FILTER).fetchone(), expected)
+    db.close()
+    return elapsed, result
+
+
+def measure_parquet(root, source, expected, count):
+    import duckdb
+    import pyarrow.parquet as pq
+    output = root / "quotes.parquet"
+    with duckdb.connect() as db:
+        schema = "{'symbol':'VARCHAR','source_time_ms':'BIGINT','batch_seq':'VARCHAR'," \
+                 "'ordinal':'INTEGER','snapshot':'VARCHAR'}"
+        start = time.perf_counter()
+        db.execute("COPY (SELECT " + FIELDS + " FROM read_csv(" + q(source) + ", header=false, columns=" +
+                   schema + ") ORDER BY symbol,source_time_ms,batch_seq,ordinal) TO " + q(output) +
+                   " (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 16384)")
+        sync(output)
+        sync(root)
+        elapsed = time.perf_counter() - start
+        if pq.read_metadata(output).num_rows != count:
+            raise RuntimeError("PyArrow found a Parquet row count mismatch")
+        result = timed_query(lambda: db.execute("SELECT count(*),sum(length(snapshot)) FROM read_parquet(" +
+                                               q(output) + ") WHERE " + FILTER).fetchone(), expected)
+    return elapsed, result
+
+
+def measure_clickhouse(root, source, expected, count):
+    from chdb.session import Session
+    # The fixture path is generated by this script. ClickHouse SQL uses backslash escapes.
+    ch_file = "'" + str(source).replace("\\", "\\\\").replace("'", "\\'") + "'"
+    with Session(str(root)) as db:
+        db.query("CREATE TABLE quotes(symbol String, source_time_ms Int64, batch_seq String, ordinal Int32,"
+                 " snapshot String) ENGINE=MergeTree ORDER BY (symbol,source_time_ms,batch_seq,ordinal)"
+                 " SETTINGS fsync_after_insert=1, fsync_part_directory=1")
+        start = time.perf_counter()
+        db.query("INSERT INTO quotes SELECT " + FIELDS + " FROM file(" + ch_file + ", 'CSV', "
+                 "'symbol String, source_time_ms Int64, batch_seq String, ordinal Int32, snapshot String') "
+                 "SETTINGS input_format_csv_try_infer_numbers_from_strings=0")
+        elapsed = time.perf_counter() - start
+        if int(str(db.query("SELECT count() FROM quotes")).strip()) != count:
+            raise RuntimeError("ClickHouse row count mismatch")
+        result = timed_query(lambda: map(int, str(db.query("SELECT count(),sum(length(snapshot)) FROM quotes WHERE " +
+                                                         FILTER)).strip().split(",")), expected)
+    return elapsed, result
+
+
+def footprint(root):
+    files = [path.stat() for path in root.rglob("*") if path.is_file() and not path.is_symlink()]
+    return {"logical_bytes": sum(stat.st_size for stat in files),
+            "allocated_bytes": sum(getattr(stat, "st_blocks", 0) * 512 for stat in files)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True, help="new benchmark result directory")
+    parser.add_argument("--rows", type=int, default=100000)
+    parser.add_argument("--repeat", type=int, default=3)
+    args = parser.parse_args()
+    if not 1000 <= args.rows <= 1000000 or not 1 <= args.repeat <= 10:
+        parser.error("rows must be 1000..1000000 and repeat 1..10")
+    root = args.output.resolve()
+    root.mkdir()
+    source = root / "input.csv"
+    expected = generate(source, args.rows)
+    import chdb
+    import duckdb
+    import pyarrow
+    report = {"synthetic": True, "rows": args.rows, "source_bytes": source.stat().st_size,
+              "versions": {"sqlite": sqlite3.sqlite_version, "duckdb": duckdb.__version__,
+                           "chdb": chdb.__version__, "pyarrow": pyarrow.__version__},
+              "expected_range": expected, "runs": []}
+    backends = [("sqlite", measure_sqlite), ("parquet_zstd", measure_parquet), ("clickhouse", measure_clickhouse)]
+    for cycle in range(args.repeat):
+        for name, measure in backends[cycle % len(backends):] + backends[:cycle % len(backends)]:
+            out = root / "{}-{}".format(name, cycle + 1)
+            out.mkdir()
+            elapsed, query = measure(out, source, expected, args.rows)
+            report["runs"].append(dict(backend=name, run=cycle + 1, import_s=elapsed,
+                                       records_per_s=args.rows / elapsed, **query, **footprint(out)))
+    rendered = json.dumps(report, indent=2)
+    (root / "results.json").write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+
+
+if __name__ == "__main__":
+    main()

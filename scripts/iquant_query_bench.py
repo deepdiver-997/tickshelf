@@ -1,6 +1,7 @@
 """Measure IQTS ingestion with concurrent hot, cold, and hybrid history queries."""
 
 import argparse
+from bisect import bisect_left
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
@@ -18,12 +19,13 @@ from stack_runtime import start_private_redis, wait_until
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 sys.path.insert(0, str(EXAMPLES))
 from iquant.sender import Sender
+from iquant import protocol as wire
 
 TOKEN = "local-iqts-query-benchmark"
 KEY = "tickshelf:iqts:query-benchmark"
 SYMBOLS = 256
 BASE_MS = 1700000000000
-MODES = ("hot", "cold", "hybrid")
+MODES = ("baseline", "hot", "cold", "hybrid")
 
 
 @dataclass
@@ -146,7 +148,7 @@ def expected_keys(first, last, stock, frame_rows):
             for index in range(start, last * frame_rows, SYMBOLS)}
 
 
-def feed(sender, start, stop, args):
+def feed(sender, start, stop, args, sent):
     batches = int((stop - start) * args.rate / args.frame_rows)
     for batch in range(batches):
         delay = start + batch * args.frame_rows / args.rate - time.monotonic()
@@ -157,7 +159,10 @@ def feed(sender, start, stop, args):
         lo = batch * args.frame_rows
         records = [[symbol_at(index), quote_at(index, args.rate)]
                    for index in range(lo, lo + args.frame_rows)]
-        sender.publish(json.dumps(records, separators=(",", ":")).encode("ascii"))
+        payload = json.dumps(records, separators=(",", ":")).encode("ascii")
+        sent.append(time.monotonic())
+        if sender.publish(payload) != len(sent):
+            raise RunError("source sequence disagrees with its latency ledger")
 
 
 def open_history(path):
@@ -229,7 +234,7 @@ def latency(values):
 
 
 def summarize(mode, queries, duration):
-    if not queries:
+    if not queries and mode != "baseline":
         raise RunError("no concurrent queries completed")
     hot = [q for q in queries if q["redis_pages"]]
     expected = sum(q["expected"] for q in queries)
@@ -255,6 +260,22 @@ def summarize(mode, queries, duration):
 def committed(db, stream):
     row = db.execute("SELECT last_seq FROM replay_cursor WHERE stream=?", (stream,)).fetchone()
     return int(row[0]) if row else 0
+
+
+def write_latencies(sent, acked, observations, begin, end):
+    first = bisect_left(sent, begin)
+    last = bisect_left(sent, end)
+    next_index = first
+    observed = []
+    for at, watermark in observations:
+        while next_index < min(last, watermark):
+            observed.append((at - sent[next_index]) * 1000)
+            next_index += 1
+    raw = [(acked[index + 1] - sent[index]) * 1000 for index in range(first, last)
+           if index + 1 in acked]
+    return {"sent_batches": last - first, "raw_ack_samples": len(raw),
+            "raw_ack_ms": latency(raw), "history_samples": len(observed),
+            "history_observed_ms": latency(observed)}
 
 
 def ready(db_path):
@@ -283,7 +304,13 @@ def run_mode(mode, path, args):
     root = path / "instance"
     db_path = root / "history.sqlite3"
     port, = candidate_ports(1)
-    with OwnedProcesses(path) as children, Sender(TOKEN.encode("ascii"), port=0) as sender:
+    sent, acked = [], {}
+
+    def on_ack(_stream, kind, first, _last):
+        if kind == wire.ACK_DATA:
+            acked[first] = time.monotonic()
+
+    with OwnedProcesses(path) as children, Sender(TOKEN.encode("ascii"), port=0, on_ack=on_ack) as sender:
         start_private_redis(children, args.redis_server, port)
         children.start("receiver", [sys.executable, "-B", EXAMPLES / "iquant" / "receiver.py",
                                      "--port", sender.address[1], "--work-dir", root,
@@ -296,30 +323,43 @@ def run_mode(mode, path, args):
             start = time.monotonic() + 0.1
             begin_queries = start + args.warmup
             stop = begin_queries + args.duration
-            source = pool.submit(feed, sender, start, stop, args)
-            clients = [pool.submit(run_client, mode, sender, db_path, port, i, begin_queries, stop, args)
-                       for i in range(args.query_clients)]
+            source = pool.submit(feed, sender, start, stop, args, sent)
+            clients = [] if mode == "baseline" else [
+                pool.submit(run_client, mode, sender, db_path, port, i, begin_queries, stop, args)
+                for i in range(args.query_clients)]
             samples = []
+            observations = []
+
+            def observe():
+                history = committed(db, stream)
+                at = time.monotonic()
+                observations.append((at, history))
+                return history, at
+
             while time.monotonic() < stop:
                 now = time.monotonic()
                 if now >= begin_queries:
                     children.require_alive("redis", "receiver")
-                    history = committed(db, stream)
+                    history, at = observe()
                     stats = sender.stats()
-                    samples.append({"t_s": now - begin_queries, "offered": stats["last_batch"],
+                    samples.append({"t_s": at - begin_queries, "offered": stats["last_batch"],
                                     "raw_acked": stats["data_watermark"], "history": history})
-                time.sleep(min(0.2, max(0, stop - time.monotonic())))
+                time.sleep(min(args.sample_ms / 1000, max(0, stop - time.monotonic())))
             source.result()
-            queries = [q for client in clients for q in client.result()]
             offered = sender.stats()["last_batch"]
-            drain_start = time.monotonic()
-            wait_until(lambda: sender.stats()["data_watermark"] == offered and committed(db, stream) == offered,
-                       timeout=15, description="raw ACK and history catch-up", processes=children,
-                       names=("redis", "receiver"))
-            drain_ms = (time.monotonic() - drain_start) * 1000
+            drained = False
+            while True:
+                history, at = observe()
+                if history == offered and sender.stats()["data_watermark"] == offered:
+                    drained = True
+                    break
+                children.require_alive("redis", "receiver")
+                if at > stop + args.drain_timeout:
+                    break
+                time.sleep(args.sample_ms / 1000)
+            drain_ms = round(max(0, at - stop) * 1000, 3) if drained else None
+            queries = [q for client in clients for q in client.result()]
             history_rows = db.execute("SELECT count(*) FROM quotes").fetchone()[0]
-            if history_rows != offered * args.frame_rows:
-                raise RunError("history audit did not match source row count")
             if len(samples) < 2:
                 raise RunError("insufficient steady-state ingest samples")
         result = summarize(mode, queries, args.duration)
@@ -329,8 +369,17 @@ def run_mode(mode, path, args):
                                 for key in ("offered", "raw_acked", "history")}
         result["peak_history_backlog_rows"] = max(sample["offered"] - sample["history"]
                                                   for sample in samples) * args.frame_rows
-        result["drain_ms"] = round(drain_ms, 3)
-        result["audited_source_rows"] = history_rows
+        result["peak_raw_backlog_rows"] = max(sample["offered"] - sample["raw_acked"]
+                                              for sample in samples) * args.frame_rows
+        result["history_backlog_growth_rps"] = round(result["ingest_rps"]["offered"]
+                                                    - result["ingest_rps"]["history"], 2)
+        result["write_latency"] = write_latencies(sent, acked, observations, begin_queries, stop)
+        result["drain_ms"] = drain_ms
+        result["drained"] = drained
+        result["source_rows"] = offered * args.frame_rows
+        result["final_history_rows"] = history_rows
+        result["audit_pass"] = drained and history_rows == result["source_rows"]
+        result["audited_source_rows"] = history_rows if result["audit_pass"] else None
         result["redis_commandstats"] = command_stats(port)
         (path / "queries.jsonl").write_text("".join(json.dumps(row) + "\n" for row in queries), encoding="utf-8")
         (path / "ingest.json").write_text(json.dumps(samples, indent=2) + "\n", encoding="utf-8")
@@ -352,10 +401,13 @@ def main():
     parser.add_argument("--frame-rows", type=int, default=32)
     parser.add_argument("--redis-page-quotes", type=int, default=256)
     parser.add_argument("--max-redis-pages", type=int, default=64)
+    parser.add_argument("--sample-ms", type=float, default=10)
+    parser.add_argument("--drain-timeout", type=float, default=45)
     args = parser.parse_args()
     if not (2 <= args.duration <= 600 and 0 <= args.warmup <= 60 and 100 <= args.rate <= 200000
             and 1 <= args.query_clients <= 64 and 0 < args.query_qps <= 2000
             and args.duration * args.query_qps <= 200000
+            and 2 <= args.sample_ms <= 200 and 1 <= args.drain_timeout <= 600
             and 1 <= args.query_frames <= 512 and 1 <= args.max_redis_pages <= 512
             and 1 <= args.frame_rows <= args.redis_page_quotes <= 256 and len(set(args.modes)) == len(args.modes)):
         parser.error("invalid duration, rate, query limits, or repeated modes")
@@ -369,7 +421,8 @@ def main():
         report["runs"].append(result)
         (root / "results.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(result, ensure_ascii=False), flush=True)
+    return 0 if all(run["audit_pass"] for run in report["runs"]) else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

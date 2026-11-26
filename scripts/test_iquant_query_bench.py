@@ -5,7 +5,7 @@ import sqlite3
 from types import SimpleNamespace
 import unittest
 
-from iquant_query_bench import KEY, latency, query_window, read_hot, source_time
+from iquant_query_bench import KEY, latency, query_window, read_hot, source_time, summarize, write_latencies
 
 STREAM = "1234"
 SYMBOL = b"600000.SH"
@@ -39,6 +39,20 @@ class Stream:
 
 
 class QueryTests(unittest.TestCase):
+    def test_write_latency_keeps_warmup_out_and_includes_drain_observation(self):
+        report = write_latencies([0, 1, 2, 4], {1: 0.1, 2: 1.01, 3: 2.02},
+                                 [(1, 1), (1.03, 2), (3.5, 3)], 1, 3)
+        self.assertEqual(report["sent_batches"], 2)
+        self.assertEqual(report["raw_ack_samples"], 2)
+        self.assertEqual(report["raw_ack_ms"]["p95"], 20)
+        self.assertEqual(report["history_samples"], 2)
+        self.assertEqual(report["history_observed_ms"]["p95"], 1500)
+
+    def test_write_only_baseline_has_no_query_latency(self):
+        result = summarize("baseline", [], 8)
+        self.assertEqual(result["actual_qps"], 0)
+        self.assertIsNone(result["latency_ms"])
+
     def test_reports_each_requested_percentile(self):
         self.assertEqual(latency(range(1, 101)), {"p50": 50, "p95": 95, "p99": 99})
 

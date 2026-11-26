@@ -92,6 +92,8 @@ SELECT stream, raw_end, last_seq FROM replay_cursor;
 
 raw 目前需要人工规划保留空间。实例启动时核验历史库所引用的 raw 文件，归档和清理需同时考虑所有这些引用。Redis Stream 可以作为独立的短期热数据管理。
 
+如需按批备份已对账数据，使用 [iQuant 增量归档](iquant-archive.md)。它可在实例运行时输出压缩 raw 和可查询的 Parquet。
+
 运行包含连续强杀和 Redis 堵塞的测试。
 
 ```sh

@@ -53,6 +53,8 @@ add_library(tickshelf_lib STATIC
   src/components/storage/sharded_store.cpp
   src/components/storage/sqlite_store.cpp
   src/components/storage/raw_journal.cpp
+  src/components/storage/file_io.cpp
+  src/components/storage/segment_frame.cpp
   src/components/storage/storage_shard_pool.cpp
   src/components/engine/dedupe.cpp
   src/components/engine/engine.cpp)

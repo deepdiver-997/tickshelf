@@ -1,6 +1,10 @@
 #include "store.hpp"
 #include "rocks_record_store.hpp"
 
+#include "common/crc32.hpp"
+#include "components/storage/file_io.hpp"
+#include "components/storage/segment_frame.hpp"
+
 #include <sqlite3.h>
 #include <openssl/evp.h>
 #ifdef TICKSHELF_HAVE_ROCKSDB
@@ -57,11 +61,8 @@ struct File {
 };
 
 void sync_directory(const fs::path& path) {
-    File dir(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
-    if (dir.fd < 0) system_failure("open directory " + path.string());
-    int rc;
-    do { rc = ::fsync(dir.fd); } while (rc < 0 && errno == EINTR);
-    if (rc < 0) system_failure("fsync directory " + path.string());
+    if (!storage_io::sync_directory(path, storage_io::SyncMode::file))
+        system_failure("sync directory " + path.string());
 }
 
 fs::path prepare_directory(const std::string& name) {
@@ -732,44 +733,34 @@ private:
     }
 };
 
-constexpr std::size_t kSegmentHeaderBytes = 32;
-constexpr auto crc_table() {
-    std::array<std::uint32_t, 256> table{};
-    for (std::uint32_t i = 0; i < table.size(); ++i) {
-        std::uint32_t crc = i;
-        for (unsigned bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320U : 0);
-        table[i] = crc;
-    }
-    return table;
-}
+using storage::kSegmentHeaderBytes;
+
 std::uint32_t crc32(std::string_view bytes) {
-    static constexpr auto table = crc_table();
-    std::uint32_t crc = 0xffffffffU;
-    for (unsigned char byte : bytes) crc = table[(crc ^ byte) & 255] ^ (crc >> 8);
-    return crc ^ 0xffffffffU;
+    return tickshelf::crc32(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
 }
 
 void sync_file(int fd, Metrics& metrics) {
     Timer timer(metrics, "file_sync");
-    int rc;
-    do {
-        metrics.inc("file_sync_calls");
-#if defined(__linux__)
-        rc = ::fdatasync(fd);
-#else
-        rc = ::fsync(fd);
-#endif
-    } while (rc < 0 && errno == EINTR);
-    if (rc < 0) system_failure("sync segment file");
+    storage_io::Counts counts;
+    const bool synced = storage_io::sync(fd, storage_io::SyncMode::data, &counts);
+    metrics.inc("file_sync_calls", counts.calls);
+    if (!synced) system_failure("sync segment file");
 }
 void read_at(int fd, std::uint64_t offset, std::string& buffer) {
-    std::size_t done = 0;
-    while (done < buffer.size()) {
-        const auto n = ::pread(fd, buffer.data() + done, buffer.size() - done, static_cast<off_t>(offset + done));
-        if (n < 0) { if (errno == EINTR) continue; system_failure("read segment"); }
-        if (n == 0) fail("indexed segment is truncated");
-        done += static_cast<std::size_t>(n);
-    }
+    if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()))
+        fail("segment read offset overflow");
+    const auto result = storage_io::read_at(fd, buffer.data(), buffer.size(), static_cast<off_t>(offset));
+    if (result == storage_io::ReadResult::error) system_failure("read segment");
+    if (result == storage_io::ReadResult::end_of_file) fail("indexed segment is truncated");
+}
+void write_at(int fd, std::uint64_t offset, std::string_view bytes, Metrics& metrics) {
+    if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()))
+        fail("segment write offset overflow");
+    storage_io::Counts counts;
+    const bool written = storage_io::write_at(fd, bytes.data(), bytes.size(), static_cast<off_t>(offset), &counts);
+    metrics.inc("file_write_calls", counts.calls);
+    metrics.inc("file_write_bytes", counts.bytes);
+    if (!written) system_failure("write segment");
 }
 struct SegmentEntry {
     std::uint64_t offset = 0, length = 0, records = 0;
@@ -1114,30 +1105,15 @@ public:
             }
             const SegmentEntry entry{end_, frame.size(), records.size(),
                                      crc32(std::string_view(frame).substr(kSegmentHeaderBytes))};
-            std::memcpy(frame.data(), "TSG1", 4);
-            const auto put = [&](std::size_t offset, std::uint64_t value, unsigned count) {
-                for (unsigned i = 0; i < count; ++i) frame[offset + i] = static_cast<char>(value >> (8 * i));
-            };
-            put(4, 1, 4);
-            put(8, payload_size, 8);
-            put(16, records.size(), 8);
-            put(24, entry.crc, 4);
+            const auto header = storage::encode_segment_header({payload_size, records.size(), entry.crc});
+            std::memcpy(frame.data(), header.data(), header.size());
             // Any error from here leaves a possibly written tail. Never erase it
             // against an uncertain commit result: recovery uses the durable index.
             poisoned_ = true;
             duplicates_.reset();
             {
                 Timer timer(metrics_, "file_append");
-                std::size_t done = 0;
-                while (done < frame.size()) {
-                    metrics_.inc("file_write_calls");
-                    const auto n = ::pwrite(data_.fd, frame.data() + done, frame.size() - done,
-                                            static_cast<off_t>(end_ + done));
-                    if (n < 0) { if (errno == EINTR) continue; system_failure("append segment"); }
-                    if (n == 0) fail("zero-byte segment append");
-                    done += static_cast<std::size_t>(n);
-                    metrics_.inc("file_write_bytes", static_cast<std::uint64_t>(n));
-                }
+                write_at(data_.fd, end_, frame, metrics_);
             }
             crash_at("after_append");
             sync_file(data_.fd, metrics_);
@@ -1391,10 +1367,9 @@ private:
     std::string verified_payload(const SegmentEntry& entry) const {
         std::string header(kSegmentHeaderBytes, '\0');
         read_at(data_.fd, entry.offset, header);
-        if (std::string_view(header).substr(0, 4) != "TSG1" || read_le(header, 4, 4) != 1 ||
-            read_le(header, 8, 8) != entry.length - kSegmentHeaderBytes ||
-            read_le(header, 16, 8) != entry.records || read_le(header, 24, 4) != entry.crc ||
-            read_le(header, 28, 4) != 0)
+        const auto decoded = storage::decode_segment_header(header);
+        if (!decoded || *decoded != storage::SegmentHeader{
+                entry.length - kSegmentHeaderBytes, entry.records, entry.crc})
             fail("indexed segment header/version/length/count/CRC metadata mismatch");
         std::string payload(entry.length - kSegmentHeaderBytes, '\0');
         read_at(data_.fd, entry.offset + kSegmentHeaderBytes, payload);
@@ -1788,16 +1763,7 @@ private:
     }
 
     void write_block(int fd, std::uint64_t offset, const std::string& block) {
-        std::size_t done = 0;
-        while (done < block.size()) {
-            metrics_.inc("file_write_calls");
-            const auto n = ::pwrite(fd, block.data() + done, block.size() - done,
-                                    static_cast<off_t>(offset + done));
-            if (n < 0) { if (errno == EINTR) continue; system_failure("append day-run block"); }
-            if (n == 0) fail("zero-byte day-run append");
-            done += static_cast<std::size_t>(n);
-            metrics_.inc("file_write_bytes", static_cast<std::uint64_t>(n));
-        }
+        write_at(fd, offset, block, metrics_);
     }
 
     void flush_metadata() {
@@ -1904,15 +1870,8 @@ private:
                 // chunk 的写是前进方向的顺序序列（中间可能夹未写满的保留区洞，
                 // 属于该 chunk 自己的保留空间）；跨天各成一列。文件偏移与帧内容
                 // 一一对应，不以拼接假设代替布局。
-                for (const auto& part : spill_parts) {
-                    std::fprintf(stderr, "DBG part seq=%u offset=%llu filled=%llu data=%zu head=%s\n",
-                                 part.seq, static_cast<unsigned long long>(part.offset),
-                                 static_cast<unsigned long long>(part.filled), part.data.size(),
-                                 [&] { std::string hex; for (unsigned char c : part.data.substr(0, 8))
-                                           hex += "0123456789abcdef"[c >> 4], hex += "0123456789abcdef"[c & 15];
-                                       return hex; }().c_str());
+                for (const auto& part : spill_parts)
                     write_block(day_file(part.day).fd, part.offset, part.data);
-                }
                 for (const auto& part : spill_parts)
                     runs_.at(part.key).chunks[part.seq].bytes = part.filled;
                 for (const auto& [key, pending] : pending_) {

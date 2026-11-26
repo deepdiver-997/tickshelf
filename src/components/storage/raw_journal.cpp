@@ -9,9 +9,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <utility>
 
 #include "common/tick.hpp"
+#include "components/storage/file_io.hpp"
 #include "components/storage/shard_route.hpp"
 
 namespace tickshelf {
@@ -23,39 +25,15 @@ constexpr std::size_t kRawMagicBytes = sizeof(kRawMagic) - 1;
 // 帧头：u32 count + u64 seq_first（LE）。上限防损坏文件把读循环撑爆。
 constexpr std::uint32_t kMaxRawFrameTicks = 1u << 20;
 
-// macOS fsync 不保证 barrier 语义；有 F_FULLFSYNC 用之（与 bench RocksDB use_fsync
-// 同一思路：能力探测，不推断）。
-bool durably_sync(int fd) {
-#if defined(F_FULLFSYNC)
-    if (::fcntl(fd, F_FULLFSYNC) == 0) return true;
-    if (errno != EINVAL) return false;  // 不支持该 ioctl 的文件系统退回 fsync
-#endif
-    return ::fsync(fd) == 0;
-}
-
 bool sync_parent_dir(const std::string& path) {
-    const std::size_t slash = path.find_last_of('/');
-    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
-    const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
-    if (fd < 0) return false;
-    const bool ok = durably_sync(fd);
-    ::close(fd);
-    return ok;
+    const auto parent = std::filesystem::path(path).parent_path();
+    return storage_io::sync_directory(parent.empty() ? "." : parent, storage_io::SyncMode::full);
 }
 
 bool write_all(int fd, const char* data, std::size_t size, std::string* error) {
-    std::size_t done = 0;
-    while (done < size) {
-        const ssize_t n = ::write(fd, data + done, size - done);
-        if (n > 0) {
-            done += static_cast<std::size_t>(n);
-            continue;
-        }
-        if (n < 0 && errno == EINTR) continue;
-        if (error) *error = std::string("raw write failed: ") + std::strerror(errno);
-        return false;
-    }
-    return true;
+    if (storage_io::append(fd, data, size)) return true;
+    if (error) *error = std::string("raw write failed: ") + std::strerror(errno);
+    return false;
 }
 
 void put_u32le(std::string& out, std::uint32_t v) {
@@ -108,7 +86,7 @@ bool RawJournalShard::open(std::string* error) {
     }
     bool created = false;
     if (st.st_size == 0) {
-        if (!write_all(raw_fd_, kRawMagic, kRawMagicBytes, error) || !durably_sync(raw_fd_)) {
+        if (!write_all(raw_fd_, kRawMagic, kRawMagicBytes, error) || !storage_io::sync(raw_fd_, storage_io::SyncMode::full)) {
             if (error && error->empty()) *error = "raw header sync failed";
             return false;
         }
@@ -116,7 +94,7 @@ bool RawJournalShard::open(std::string* error) {
         created = true;
     } else {
         char head[kRawMagicBytes];
-        if (::pread(raw_fd_, head, kRawMagicBytes, 0) != static_cast<ssize_t>(kRawMagicBytes) ||
+        if (storage_io::read_at(raw_fd_, head, kRawMagicBytes, 0) != storage_io::ReadResult::complete ||
             std::memcmp(head, kRawMagic, kRawMagicBytes) != 0) {
             if (error) *error = "raw header mismatch: not a tickshelf raw journal file";
             return false;
@@ -163,7 +141,14 @@ bool RawJournalShard::scan_and_replay(std::string* error) {
 
     while (offset < file_size) {
         std::uint8_t header[12];
-        if (::pread(scan_fd, header, sizeof(header), offset) != static_cast<ssize_t>(sizeof(header))) {
+        const auto header_read = storage_io::read_at(scan_fd, header, sizeof(header), offset);
+        if (header_read == storage_io::ReadResult::error) {
+            const int code = errno;
+            ::close(scan_fd);
+            if (error) *error = std::string("raw frame header read failed: ") + std::strerror(code);
+            return false;
+        }
+        if (header_read == storage_io::ReadResult::end_of_file) {
             scan_ok = false;  // 撕裂帧头
             break;
         }
@@ -196,9 +181,15 @@ bool RawJournalShard::scan_and_replay(std::string* error) {
         std::vector<Tick> ticks;
         ticks.resize(count);
         std::vector<std::uint8_t> body(body_bytes);
-        if (::pread(scan_fd, body.data(), body_bytes,
-                    offset + static_cast<off_t>(sizeof(header))) !=
-            static_cast<ssize_t>(body_bytes)) {
+        const auto body_read = storage_io::read_at(scan_fd, body.data(), body.size(),
+                                                    offset + static_cast<off_t>(sizeof(header)));
+        if (body_read == storage_io::ReadResult::error) {
+            const int code = errno;
+            ::close(scan_fd);
+            if (error) *error = std::string("raw frame body read failed: ") + std::strerror(code);
+            return false;
+        }
+        if (body_read == storage_io::ReadResult::end_of_file) {
             scan_ok = false;
             break;
         }
@@ -260,7 +251,7 @@ void RawJournalShard::persist_watermark() {
         ::close(fd);
         return;
     }
-    if (!durably_sync(fd)) {
+    if (!storage_io::sync(fd, storage_io::SyncMode::full)) {
         ::close(fd);
         return;
     }
@@ -294,7 +285,7 @@ std::int64_t RawJournalShard::upsert_flush(
         --raw_fault_times_;  // 测试注入：帧字节已写入但按同步失败处理（不可信）
         append_ok = false;
     }
-    if (append_ok) append_ok = durably_sync(raw_fd_);
+    if (append_ok) append_ok = storage_io::sync(raw_fd_, storage_io::SyncMode::full);
     if (!append_ok) {
         // 追加/同步失败：帧字节可能已部分/全部落在文件里但不可信，索引绝不提交。
         // 立即截回最后完整帧边界，让后续追加仍落在帧对齐位置——否则下一帧会追加
@@ -339,7 +330,7 @@ void RawJournalShard::idle_maintenance() {
     std::uint8_t header[12];
     const auto offset = static_cast<off_t>(replay_offset_);
     if (replay_offset_ > raw_bytes_ || raw_bytes_ - replay_offset_ < sizeof(header) ||
-        ::pread(raw_fd_, header, sizeof(header), offset) != static_cast<ssize_t>(sizeof(header)))
+        storage_io::read_at(raw_fd_, header, sizeof(header), offset) != storage_io::ReadResult::complete)
         return;
     const std::uint32_t count = get_u32le(header);
     const std::uint64_t first = get_u64le(header + 4);
@@ -347,8 +338,8 @@ void RawJournalShard::idle_maintenance() {
     const std::uint64_t bytes = static_cast<std::uint64_t>(count) * kTickBytes;
     if (bytes > raw_bytes_ - replay_offset_ - sizeof(header)) return;
     std::vector<std::uint8_t> body(static_cast<std::size_t>(bytes));
-    if (::pread(raw_fd_, body.data(), body.size(), offset + sizeof(header)) !=
-        static_cast<ssize_t>(body.size())) return;
+    if (storage_io::read_at(raw_fd_, body.data(), body.size(), offset + sizeof(header)) !=
+        storage_io::ReadResult::complete) return;
     std::vector<Tick> ticks(count);
     for (std::uint32_t i = 0; i < count; ++i)
         ticks[i] = decode_tick(body.data() + static_cast<std::size_t>(i) * kTickBytes);

@@ -114,6 +114,10 @@ python3 scripts/engine_bench.py --suite native --build build-bench-release \
 
 ## 存储布局对照：行式索引 vs 批段稀疏索引 vs 按天 run
 
+TSG1 段头编解码和文件 I/O 位于 [src/components/storage](../src/components/storage/)。
+段式实验与 TTAP raw journal 共用完整读写及同步原语，分别选择自己的同步方式。
+RCD1 记录、实验索引、触发故障的开关和独立核对仍由 bench 持有。
+
 `examples/bench/ablation-storage-matrix.json` 把四种最终存储放到同一输入、同一 FULL 同步、同一 oracle 下对照：
 
 | 后端 | 数据布局 | 索引写入（每批） | 查询路径 |

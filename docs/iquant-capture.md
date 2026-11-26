@@ -94,6 +94,8 @@ raw 目前需要人工规划保留空间。实例启动时核验历史库所引�
 
 如需按批备份已对账数据，使用 [iQuant 增量归档](iquant-archive.md)。它可在实例运行时输出压缩 raw 和可查询的 Parquet。
 
+并发查询、Redis 单页上限和新鲜度的复跑方法见 [边写边查压测](iquant-query-benchmark.md)。
+
 运行包含连续强杀和 Redis 堵塞的测试。
 
 ```sh

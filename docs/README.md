@@ -26,6 +26,7 @@
 | [real-source-sim.md](real-source-sim.md) | 外部 JSON mock 源的私有 Redis 全链演练 |
 | [iquant-capture.md](iquant-capture.md) | iQuant 实盘快照采集、raw ACK、历史重放与 Redis 热发布 |
 | [iquant-archive.md](iquant-archive.md) | iQuant 增量归档、压缩 raw、Parquet 类型和恢复 |
+| [iquant-query-benchmark.md](iquant-query-benchmark.md) | iQuant 持续写入时的热查、冷查和混合查询压测 |
 | [iquant-storage-benchmark.md](iquant-storage-benchmark.md) | iQuant 变长快照的 SQLite、Parquet、ClickHouse 导入、查询与空间对照 |
 
 ## 实测证据（带日期，冻结：只追加新日期，不改写旧文件）
